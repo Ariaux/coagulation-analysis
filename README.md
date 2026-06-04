@@ -8,7 +8,7 @@ ImageJ 工作流自动化：**8-bit → Invert → Rectangle ROI → Measure Mea
 
 ```bash
 cd /Users/aria/Downloads/chenmeixi
-python3 full_workflow.py 待分析图片/你的图片.JPG --rows 3 --cols 6
+python3 full_workflow.py input/你的图片.JPG --rows 3 --cols 6
 ```
 
 ---
@@ -61,7 +61,7 @@ python3 full_workflow.py 待分析图片/你的图片.JPG --rows 3 --cols 6
 所有结果在图片旁边的 `图片名_analysis/` 文件夹里：
 
 ```
-待分析图片/
+input/
 ├── 你的图片.JPG                          ← 原始照片
 └── 你的图片_analysis/                     ← 分析结果文件夹
     ├── 你的图片_grid_overlay.png          ← 框选识别结果（黄色矩形+绿色网格+编号）

@@ -8,8 +8,8 @@ __pycache__/
 *.png
 *.PNG
 # Ignore images in input folder but keep folder structure
-待分析图片/*.jpg
-待分析图片/*.JPG
-待分析图片/*.jpeg
-待分析图片/*.png
-待分析图片/*.PNG
+input/*.jpg
+input/*.JPG
+input/*.jpeg
+input/*.png
+input/*.PNG
