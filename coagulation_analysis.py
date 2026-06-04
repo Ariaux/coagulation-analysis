@@ -456,6 +456,7 @@ def main():
     parser.add_argument("--size", type=float, default=0.30, help="Slide size as fraction (default: 0.30)")
     parser.add_argument("--manual", action="store_true", help="Manual ROI selection")
     parser.add_argument("--batch", action="store_true", help="Process all images in directory")
+    parser.add_argument("--watch", action="store_true", help="Watch folder for new images, auto-process")
     parser.add_argument("--output-dir", default=None, help="Output directory")
     args = parser.parse_args()
 
@@ -464,10 +465,44 @@ def main():
         sys.exit(1)
 
     # Collect images
-    if args.batch:
+    if args.batch or args.watch:
         if not os.path.isdir(args.image):
-            print("Error: --batch requires a directory")
+            print("Error: --batch/--watch requires a directory")
             sys.exit(1)
+
+    if args.watch:
+        # ── Watch mode: monitor folder for new images ──
+        import time
+        watch_dir = os.path.abspath(args.image)
+        processed = set()
+        print(f"\n{'='*55}")
+        print(f"  WATCH MODE — {args.rows}×{args.cols} grid")
+        print(f"  Watching: {watch_dir}/")
+        print(f"  Drop images here → auto-analyze → results in *_analysis/")
+        print(f"  Press Ctrl+C to stop")
+        print(f"{'='*55}")
+
+        while True:
+            current = set(glob.glob(os.path.join(watch_dir, "*.jpg")) +
+                         glob.glob(os.path.join(watch_dir, "*.JPG")) +
+                         glob.glob(os.path.join(watch_dir, "*.jpeg")) +
+                         glob.glob(os.path.join(watch_dir, "*.png")) +
+                         glob.glob(os.path.join(watch_dir, "*.PNG")))
+            new_images = sorted(p for p in current if p not in processed)
+            for img_path in new_images:
+                # Skip files still being written (size changing)
+                try:
+                    s1 = os.path.getsize(img_path)
+                    time.sleep(0.5)
+                    if os.path.getsize(img_path) != s1:
+                        continue
+                except OSError:
+                    continue
+                process_image(img_path, args)
+                processed.add(img_path)
+            time.sleep(2)
+
+    elif args.batch:
         images = sorted(glob.glob(os.path.join(args.image, "*.jpg")) +
                         glob.glob(os.path.join(args.image, "*.JPG")) +
                         glob.glob(os.path.join(args.image, "*.jpeg")) +
@@ -488,6 +523,9 @@ def main():
         result = process_image(img_path, args)
         if result:
             all_results[os.path.basename(img_path)] = result
+
+    if args.watch:
+        return  # watch mode runs forever
 
     if len(all_results) > 1:
         # Batch summary
