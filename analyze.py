@@ -13,12 +13,14 @@ import numpy as np
 import cv2
 
 def analyze_image(image_path):
-    """8-bit → invert → measure whole image."""
+    """ImageJ: 8-bit → invert → measure whole image."""
     img = cv2.imread(image_path)
     if img is None:
         return None
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    inverted = 255 - gray  # ImageJ: Edit > Invert
+    # ImageJ-exact grayscale: 0.299*R + 0.587*G + 0.114*B
+    b, g, r = img[:,:,0].astype(np.float32), img[:,:,1].astype(np.float32), img[:,:,2].astype(np.float32)
+    gray = np.clip(0.114*b + 0.587*g + 0.299*r, 0, 255).astype(np.uint8)
+    inverted = cv2.bitwise_not(gray)
 
     mean_val = float(np.mean(inverted))
     median_val = float(np.median(inverted))

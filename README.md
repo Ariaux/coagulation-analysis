@@ -1,60 +1,53 @@
 # 凝血定量分析工具
 
-复现 ImageJ 标准工作流：**8-bit → Invert → Rectangle ROI → Measure Mean**
+## 三个脚本，对应三种场景
 
-## 两种方式
+| 脚本 | 场景 | 用法 |
+|------|------|------|
+| `full_workflow.py` | **整张玻片照片**：交互框选 → 自动裁切分格 → 热力图 → 多组对比 | `python3 full_workflow.py 玻片照.jpg` |
+| `analyze.py` | **已裁好的方格截图**：拖进去直接分析 | `python3 analyze.py 文件夹/ --watch` |
+| `coagulation_analysis.py` | 全自动（旧版，低对比度图可能不准） | `python3 coagulation_analysis.py 图.jpg` |
 
-### 方式一：ImageJ 宏（直接在 ImageJ/Fiji 里用）
-
-1. 用 ImageJ/Fiji 打开图片
-2. Plugins > Macros > Run... > 选择 `imagej_workflow.ijm`
-3. 在玻片上画矩形框 → 点 OK
-4. 结果自动保存到图片旁边的 `results_*/` 文件夹
-
-### 方式二：Python 脚本（自动化批处理）
+## full_workflow.py — 推荐主用
 
 ```bash
-# 安装
-pip3 install opencv-python numpy
+# 交互裁切单张玻片
+python3 full_workflow.py 玻片照.jpg --rows 3 --cols 6
 
-# 单张（自动检测玻片 + 全片分析）
-python3 coagulation_analysis.py image.jpg
-
-# 12格分析（3行×4列）
-python3 coagulation_analysis.py image.jpg --rows 3 --cols 4
-
-# 手动框选玻片
-python3 coagulation_analysis.py image.jpg --manual
-
-# 批量处理
-python3 coagulation_analysis.py /path/to/folder/ --batch --rows 3 --cols 4
+# 多组对比（实验组 vs 对照组）
+python3 full_workflow.py 图片文件夹/ --compare --rows 3 --cols 6
 ```
 
-## 工作流对照
+### 操作流程
+1. 拖矩形框住所有方格 → 空格确认
+2. 预览网格 → 任意键确认，ESC 重来
+3. 自动裁切 → ImageJ 精度分析 → 出热力图 + CSV
 
-| ImageJ 操作 | Python 等价 |
-|-------------|------------|
-| Image > Type > 8-bit | `cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)` |
-| Edit > Invert | `cv2.bitwise_not(gray)` = 255 - gray |
-| Rectangle ROI | 自动纹理检测 或 `--manual` 手动 |
-| Analyze > Measure | Mean, Area, StdDev, Min, Max, IntDen |
+### 输出
+- `*_heatmap.png` — 热力图（蓝=低凝血，红=高凝血）
+- `*_results.csv` — 每格 Mean/Median/Std/IntDen
+- `cell_*.png` — 裁好的每格图片
+- `comparison_results.csv` — 多组对比汇总表（--compare 模式）
 
-## 输出
+## analyze.py — 已有裁切好的方格
 
-| 文件 | 内容 |
+```bash
+# 监控模式
+python3 analyze.py 待分析图片/ --watch
+
+# 批量
+python3 analyze.py 待分析图片/ --batch
+```
+
+## 指标说明（反色后，值越高=凝血越多）
+
+| 指标 | 含义 |
 |------|------|
-| `*_detection.png` | 玻片检测结果（绿框） |
-| `*_grid_overlay.png` | 网格划分（黄框=纹理区，绿线=格子） |
-| `*_grid_heatmap.png` | 12格反色热力图 |
-| `*_cell_XX.png` | 每格原图/灰度/反色对比 |
-| `*_results.csv` | 数据表（Excel 直接打开） |
-| `*_results.json` | 完整数据 |
+| Mean | 该格平均灰度，核心指标 |
+| Std | 标准差，反映凝血均匀度 |
+| IntDen | 积分光密度 = Mean × 像素数 |
 
-## 指标（反色后，值越高 = 凝血越多）
+## 精度对齐
 
-| 指标 | ImageJ 名称 | 含义 |
-|------|------------|------|
-| Mean | Mean | 平均灰度，核心指标 |
-| StdDev | StdDev | 标准差，凝血均匀度 |
-| IntDen | IntDen | 积分光密度 = Mean × 像素数 |
-| Area | Area | ROI 面积（像素） |
+灰度转换使用 ImageJ 完全一致的公式：`gray = 0.299×R + 0.587×G + 0.114×B`
+反色：`255 - gray`
