@@ -1,122 +1,132 @@
-# 凝血定量分析工具
+# Coagulation Quantification Pipeline
 
-ImageJ 工作流自动化：**8-bit → Invert → Rectangle ROI → Measure Mean**
+An automated implementation of the standard ImageJ workflow for coagulation assay analysis: **8-bit conversion → invert → region-of-interest measurement**.
 
 ---
 
-## 快速开始
+## Installation
+
+```bash
+pip3 install opencv-python numpy
+```
+
+## Quick Start
 
 ```bash
 cd /Users/aria/Downloads/chenmeixi
-python3 full_workflow.py input/你的图片.JPG --rows 3 --cols 6
+python3 full_workflow.py input/image.JPG --rows 3 --cols 6
 ```
 
 ---
 
-## 操作步骤（每一步会看到什么）
+## Workflow
 
-### 第1步：拖矩形框选
+### Step 1 — ROI Specification
 
-弹出一个窗口，显示你的玻片照片。
+A window displaying the slide image will appear.
 
-| 操作 | 效果 |
-|------|------|
-| 鼠标按住拖动 | 画绿色矩形，框住所有方格（别包含刻度线） |
-| 松开鼠标 | 绿色网格线预览出现 |
-| **空格键** | 确认，进入下一步 |
+| Action | Result |
+|--------|--------|
+| Click and drag | Draw a bounding rectangle enclosing all sample squares (exclude scale bars or extraneous markings) |
+| Release mouse | Grid overlay preview is rendered |
+| **Space** | Confirm and proceed |
 
-### 第2步：微调确认
+### Step 2 — Grid Alignment Refinement
 
-弹出预览窗口，绿色网格线叠加在照片上，每格有编号。
+A preview window displays the grid overlay (green lines) superimposed on the original image, with each cell numbered.
 
-| 按键 | 效果 |
-|------|------|
-| **↑ ↓ ← →** | 微调矩形位置 |
-| **+ / -** | 调大/调小每次移动的步长 |
-| **ENTER** | 确认，开始分析 |
-| **ESC** | 重来，回到第1步 |
+| Key | Function |
+|-----|----------|
+| **↑ ↓ ← →** | Nudge the bounding rectangle by n pixels |
+| **+ / −** | Increase / decrease the nudge step size |
+| **Enter** | Confirm and begin analysis |
+| **Esc** | Discard and return to Step 1 |
 
-### 第3步：自动分析
+### Step 3 — Automated Analysis
 
-按 ENTER 后全自动完成：
-- 裁切每格图片
-- 8-bit 灰度转换（ImageJ 同款公式）
-- 反色（255 - 灰度）
-- 计算 Mean / Median / Std / IntDen
+Upon confirmation, the following operations are executed automatically:
 
-### 第4步：查看结果
+1. Extraction of each grid cell as an individual image
+2. Conversion to 8-bit grayscale using the ImageJ-equivalent formula:  
+   `gray = 0.299·R + 0.587·G + 0.114·B`
+3. Inversion: `I′ = 255 − I` (coagulation signal becomes positive)
+4. Computation of descriptive statistics per cell
 
-分析完成后自动弹出一个窗口：
+### Step 4 — Results Display
 
-| 左边 | 右边 |
-|------|------|
-| 原始照片 + 绿色网格叠加 | 热力图（蓝=低凝血，红=高凝血） |
-
-按**任意键**关闭窗口。
+A results window opens showing the grid overlay alongside the heatmap. Press **any key** to dismiss.
 
 ---
 
-## 输出文件
+## Output
 
-所有结果在图片旁边的 `图片名_analysis/` 文件夹里：
+All results are saved to a subdirectory named `<image>_analysis/`, co-located with the input image:
 
 ```
 input/
-├── 你的图片.JPG                          ← 原始照片
-└── 你的图片_analysis/                     ← 分析结果文件夹
-    ├── 你的图片_grid_overlay.png          ← 框选识别结果（黄色矩形+绿色网格+编号）
-    ├── 你的图片_heatmap.png               ← 热力图（每格数值标注，蓝→红=低→高凝血）
-    ├── 你的图片_results.csv               ← 数据表（Excel 直接打开）
-    ├── 你的图片_results.json              ← 完整数据
-    └── cell_01.png ~ cell_18.png          ← 裁好的每格原图
+├── image.JPG                    # Original micrograph
+└── image_analysis/
+    ├── image_grid_overlay.png   # Annotated ROI: bounding rectangle, grid lines, cell indices
+    ├── image_heatmap.png        # Heatmap (blue = low, red = high coagulation), with per-cell mean values
+    ├── image_results.csv        # Tabular data (comma-separated, Excel-compatible)
+    ├── image_results.json       # Structured data (machine-readable)
+    └── cell_01.png … cell_N.png # Extracted individual cell images
 ```
 
----
+## Metrics
 
-## 数据指标
+All statistics are computed on the **inverted** image (255 − grayscale). Higher values indicate greater coagulation.
 
-所有指标基于**反色后**灰度值（255 - 原始灰度），**值越高 = 凝血越多**。
+| Column | ImageJ Equivalent | Description |
+|--------|-------------------|-------------|
+| `mean` | Mean | Arithmetic mean of pixel intensities within the cell — **primary endpoint** |
+| `median` | — | Median pixel intensity |
+| `std` | StdDev | Standard deviation; larger values indicate greater heterogeneity |
+| `min` | Min | Minimum pixel intensity |
+| `max` | Max | Maximum pixel intensity |
+| `int_den` | IntDen | Integrated density (mean × pixel count) |
+| `area_px` | Area | Cell area in pixels |
 
-| CSV 列名 | ImageJ 对应 | 含义 |
-|----------|------------|------|
-| mean | Mean | 该格平均灰度，**核心指标** |
-| median | — | 中位数 |
-| std | StdDev | 标准差，越大越不均匀 |
-| min / max | Min / Max | 最小/最大灰度 |
-| int_den | IntDen | 积分光密度 = mean × 像素数 |
-| area_px | Area | 该格像素面积 |
+## Group Comparison
 
----
-
-## 多组对比（实验组 vs 对照组）
+For multi-slide experiments (e.g., treatment vs. control):
 
 ```bash
-python3 full_workflow.py 图片文件夹/ --compare --rows 3 --cols 6
+python3 full_workflow.py input/ --compare --rows 3 --cols 6
 ```
 
-会依次让你框选每张玻片，最后生成：
-- `comparison_results.csv` — 所有玻片每格 mean 值横向对比表
-- `comparison_heatmaps.png` — 所有玻片热力图并排
+Each slide is processed interactively in sequence. The script then generates:
+
+- `comparison_results.csv` — per-cell mean values across all slides in a single table
+- `comparison_heatmaps.png` — vertically stacked heatmaps for visual comparison
+
+## Processing Individual Cell Images
+
+If cells have already been manually cropped:
+
+```bash
+python3 analyze.py input/ --batch   # Process all images in directory
+python3 analyze.py input/ --watch   # Monitor directory; auto-process new images
+```
+
+## Grayscale Conversion Fidelity
+
+The grayscale conversion formula is identical to ImageJ (Fiji):
+
+```
+I_gray(x,y) = 0.299 × R(x,y) + 0.587 × G(x,y) + 0.114 × B(x,y)
+I_inv(x,y)  = 255 − I_gray(x,y)
+```
+
+Values produced by this pipeline are directly comparable to those obtained through manual ImageJ operation.
 
 ---
 
-## 其他脚本
+## Repository Structure
 
-| 脚本 | 用途 |
-|------|------|
-| `full_workflow.py` | **主用**：整张玻片照 → 交互框选 → 裁切分析 |
-| `analyze.py` | 已裁好的单格图片，直接测灰度 |
-| `coagulation_analysis.py` | 旧版全自动检测（低对比度图可能不准） |
-
----
-
-## 精度说明
-
-灰度转换与 ImageJ 完全一致：
-
-```
-gray = 0.299×R + 0.587×G + 0.114×B
-反色 = 255 - gray
-```
-
-可与 ImageJ 手动操作结果直接对标。
+| File | Purpose |
+|------|---------|
+| `full_workflow.py` | **Primary tool**: interactive grid cropping + analysis + heatmap visualization |
+| `analyze.py` | Direct measurement of pre-cropped single-cell images |
+| `coagulation_analysis.py` | Legacy: fully automated slide detection and grid division |
+| `imagej_workflow.ijm` | ImageJ macro (alternative to the Python pipeline) |
