@@ -157,27 +157,68 @@ def interactive_grid_crop(image_path, n_rows, n_cols):
                 "position": (xs, ys, cell_w, cell_h),
             })
 
-    # Show preview and confirm
-    preview = img.copy()
-    cv2.rectangle(preview, (sx, sy), (ex, ey), (0, 255, 255), 2)
-    for c in cells:
-        xs, ys, cw, ch = c["position"]
-        cv2.rectangle(preview, (xs, ys), (xs+cw, ys+ch), (0, 255, 0), 1)
-        cv2.putText(preview, str(c["idx"]), (xs + cw//2 - 10, ys + ch//2 + 5),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+    # ── Fine-tuning preview with arrow keys ──
+    shift = 3  # pixels per arrow-key nudge (at original resolution)
+    while True:
+        # Recompute cells with current sx,sy,ex,ey
+        grid_w, grid_h = ex - sx, ey - sy
+        cell_w, cell_h = grid_w // n_cols, grid_h // n_rows
+        cells = []
+        for row in range(n_rows):
+            for col in range(n_cols):
+                idx = row * n_cols + col + 1
+                xs = sx + col * cell_w
+                ys = sy + row * cell_h
+                xe = xs + cell_w
+                ye = ys + cell_h
+                cell_img = img[ys:ye, xs:xe].copy()
+                cells.append({"idx": idx, "row": row+1, "col": col+1,
+                              "image": cell_img, "position": (xs, ys, cell_w, cell_h)})
 
-    scale2 = 1.0
-    if max(w, h) > 1200:
-        scale2 = 1200 / max(w, h)
-        preview = cv2.resize(preview, (int(w*scale2), int(h*scale2)))
+        preview = img.copy()
+        cv2.rectangle(preview, (sx, sy), (ex, ey), (0, 255, 255), 2)
+        for c in cells:
+            xs_p, ys_p, cw, ch = c["position"]
+            cv2.rectangle(preview, (xs_p, ys_p), (xs_p+cw, ys_p+ch), (0, 255, 0), 1)
+            cv2.putText(preview, str(c["idx"]), (xs_p + cw//2 - 12, ys_p + ch//2 + 6),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    cv2.imshow("Preview — any key to confirm, ESC to redo", preview)
-    key = cv2.waitKey(0) & 0xFF
-    cv2.destroyAllWindows()
+        # Resize preview for display
+        s2 = 1.0
+        if max(w, h) > 1200:
+            s2 = 1200 / max(w, h)
+            preview_disp = cv2.resize(preview, (int(w*s2), int(h*s2)))
+        else:
+            preview_disp = preview.copy()
 
-    if key == 27:
-        return None  # Redo
-    return cells
+        msg = "Check grid! Arrows=nudge  +/-=zoom  ENTER=confirm  ESC=redo"
+        cv2.putText(preview_disp, msg, (10, preview_disp.shape[0]-10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.putText(preview_disp, f"Rect: ({sx},{sy})-({ex},{ey})  Cell: {cell_w}x{cell_h}px",
+                   (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        cv2.imshow("Preview — adjust with arrow keys, ENTER to confirm", preview_disp)
+        key = cv2.waitKey(0) & 0xFF
+
+        if key == 13:  # ENTER
+            cv2.destroyAllWindows()
+            return cells
+        elif key == 27:  # ESC
+            cv2.destroyAllWindows()
+            return None
+        elif key == 81:  # left arrow
+            sx = max(0, sx - shift)
+        elif key == 83:  # right arrow
+            ex = min(w, ex + shift)
+        elif key == 82:  # up arrow
+            sy = max(0, sy - shift)
+        elif key == 84:  # down arrow
+            ey = min(h, ey + shift)
+        elif key == 43 or key == 61:  # + key
+            shift = min(shift * 2, 50)
+        elif key == 45:  # - key
+            shift = max(shift // 2, 1)
+        cv2.destroyWindow("Preview — adjust with arrow keys, ENTER to confirm")
 
 
 # ═══════════════════════════════════════════════════════════════
