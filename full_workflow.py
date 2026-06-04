@@ -351,6 +351,12 @@ def process_single(image_path, n_rows, n_cols, output_dir=None):
     print(f"  Data:    {csv_path}")
     print(f"  Cells:   {output_dir}/cell_*.png")
 
+    # ── Pop up heatmap window ──
+    heatmap_img = cv2.imread(heatmap_path)
+    cv2.imshow(f"RESULTS — {image_name} (press any key to close)", heatmap_img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
     return results
 
 
