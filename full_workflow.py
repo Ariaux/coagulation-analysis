@@ -311,6 +311,24 @@ def process_single(image_path, n_rows, n_cols, output_dir=None):
         print("Cancelled.")
         return None
 
+    # ── Save grid overlay (框选识别结果) ──
+    original = cv2.imread(image_path)
+    overlay = original.copy()
+    # Yellow rectangle = grid area
+    xs0, ys0 = cells[0]["position"][0], cells[0]["position"][1]
+    last = cells[-1]["position"]
+    xe0, ye0 = last[0] + last[2], last[1] + last[3]
+    cv2.rectangle(overlay, (xs0, ys0), (xe0, ye0), (0, 255, 255), 3)
+    # Green grid lines + cell numbers
+    for c in cells:
+        xs, ys, cw, ch = c["position"]
+        cv2.rectangle(overlay, (xs, ys), (xs+cw, ys+ch), (0, 255, 0), 1)
+        cv2.putText(overlay, str(c["idx"]), (xs + cw//2 - 12, ys + ch//2 + 6),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    overlay_path = os.path.join(output_dir, f"{image_name}_grid_overlay.png")
+    cv2.imwrite(overlay_path, overlay)
+    print(f"  Grid overlay: {overlay_path}")
+
     # Step 2: Analyze each cell (ImageJ-precise)
     results = []
     for c in cells:
@@ -351,9 +369,18 @@ def process_single(image_path, n_rows, n_cols, output_dir=None):
     print(f"  Data:    {csv_path}")
     print(f"  Cells:   {output_dir}/cell_*.png")
 
-    # ── Pop up heatmap window ──
+    # ── Pop up results window: grid overlay + heatmap side by side ──
     heatmap_img = cv2.imread(heatmap_path)
-    cv2.imshow(f"RESULTS — {image_name} (press any key to close)", heatmap_img)
+    ov_img = cv2.imread(overlay_path)
+    # Resize heatmap to match overlay height
+    if ov_img is not None and heatmap_img is not None:
+        scale_h = ov_img.shape[0] / heatmap_img.shape[0]
+        new_w = int(heatmap_img.shape[1] * scale_h)
+        hm_resized = cv2.resize(heatmap_img, (new_w, ov_img.shape[0]))
+        side_by_side = np.hstack([ov_img, hm_resized])
+        cv2.imshow(f"RESULTS — {image_name}  Left: grid overlay  Right: heatmap  (any key to close)", side_by_side)
+    else:
+        cv2.imshow(f"RESULTS — {image_name} (press any key to close)", heatmap_img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
