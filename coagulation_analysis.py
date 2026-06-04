@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Coagulation Quantification Pipeline — 12-Square Grid Analysis
-==============================================================
-Replicates the standard ImageJ workflow for coagulation assays:
-  1. Auto-detect square glass slide ROI
-  2. Divide slide into 4×3 grid (12 individual squares)
-  3. For each square: invert colors (255-gray), measure gray values
-  4. Output per-square data (JSON + CSV) + visualizations
+Coagulation Quantification Pipeline — ImageJ Workflow Automation
+=================================================================
+Exact ImageJ workflow replicated:
+  1. Image > Type > 8-bit        →  convert to grayscale (0-255)
+  2. Edit > Invert               →  255 - gray (coagulation = bright)
+  3. Rectangle ROI on glass slide →  auto-detect or manual
+  4. Analyze > Measure           →  Mean, Area, StdDev, Min, Max, IntDen
+  5. Optional: divide into grid  →  per-square analysis (e.g. 4×3 = 12)
 
 Usage:
   python3 coagulation_analysis.py <image.jpg>
   python3 coagulation_analysis.py <image.jpg> --rows 4 --cols 3
   python3 coagulation_analysis.py <image.jpg> --manual     # interactive ROI
   python3 coagulation_analysis.py <folder/> --batch        # all images
+
+Output matches ImageJ terminology: Mean, Area, IntDen, StdDev
 """
 
 import sys, os, json, argparse, glob
