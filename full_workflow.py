@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Coagulation Full Workflow — 半自动裁切 + 分析 + 可视化 + 多组对比
-=================================================================
-1. 交互式网格裁切（拖矩形 → 自动分格）
-2. ImageJ 精度对齐 (8-bit → Invert → Measure)
-3. 热力图可视化
-4. 多组实验结果汇总对比
+Coagulation Full Workflow — Semi-automated grid cropping + analysis + visualization
+===================================================================================
+1. Interactive grid cropping (drag rectangle → auto-divide into cells)
+2. ImageJ-precision alignment (8-bit → Invert → Measure)
+3. Heatmap visualization
+4. Multi-group comparison
 
-用法:
-  python3 full_workflow.py 玻片照.jpg                  # 交互裁切+分析
-  python3 full_workflow.py 玻片照.jpg --rows 3 --cols 6
-  python3 full_workflow.py 文件夹/ --compare            # 多组对比
+Usage:
+  python3 full_workflow.py slide.jpg                   # interactive crop + analysis
+  python3 full_workflow.py slide.jpg --rows 3 --cols 6
+  python3 full_workflow.py folder/ --compare           # multi-group comparison
 """
 import sys, os, json, glob, time, argparse
 import numpy as np
 import cv2
 
 # ═══════════════════════════════════════════════════════════════
-#  ImageJ 精度对齐
+#  ImageJ-Precision Grayscale Conversion
 # ═══════════════════════════════════════════════════════════════
 
 def to_8bit_grayscale(bgr_image):
@@ -53,7 +53,7 @@ def measure(inverted_image):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  交互式网格裁切
+#  Interactive Grid Cropping
 # ═══════════════════════════════════════════════════════════════
 
 def interactive_grid_crop(image_path, n_rows, n_cols):
@@ -95,9 +95,9 @@ def interactive_grid_crop(image_path, n_rows, n_cols):
     cv2.setMouseCallback(win_name, on_mouse)
 
     print("\n  ┌──────────────────────────────────────┐")
-    print("  │  鼠标拖一个矩形，框住所有方格        │")
-    print("  │  按 空格键 确认   按 ESC 取消        │")
-    print(f"  │  网格: {n_rows}行 × {n_cols}列 = {n_rows*n_cols}格  │")
+    print("  │  Drag a rectangle around all squares  │")
+    print("  │  SPACE = confirm    ESC = cancel      │")
+    print(f"  │  Grid: {n_rows} rows × {n_cols} cols = {n_rows*n_cols} cells │")
     print("  └──────────────────────────────────────┘")
 
     while True:
@@ -222,7 +222,7 @@ def interactive_grid_crop(image_path, n_rows, n_cols):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  可视化热力图
+#  Heatmap Visualization
 # ═══════════════════════════════════════════════════════════════
 
 def generate_heatmap(cells_results, output_path, title=""):
@@ -295,7 +295,7 @@ def generate_heatmap(cells_results, output_path, title=""):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  单张图片处理
+#  Single Image Pipeline
 # ═══════════════════════════════════════════════════════════════
 
 def process_single(image_path, n_rows, n_cols, output_dir=None):
@@ -311,7 +311,7 @@ def process_single(image_path, n_rows, n_cols, output_dir=None):
         print("Cancelled.")
         return None
 
-    # ── Save grid overlay (框选识别结果) ──
+    # ── Save grid overlay (ROI annotation) ──
     original = cv2.imread(image_path)
     overlay = original.copy()
     # Yellow rectangle = grid area
@@ -388,7 +388,7 @@ def process_single(image_path, n_rows, n_cols, output_dir=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  多组对比
+#  Multi-Group Comparison
 # ═══════════════════════════════════════════════════════════════
 
 def compare_groups(folder_path, n_rows, n_cols):

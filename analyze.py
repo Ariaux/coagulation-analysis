@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Coagulation Analysis — 直接分析已裁切好的方格图片
-ImageJ workflow: 8-bit → Invert → Measure Mean (整张图)
+Coagulation Analysis — Direct measurement of pre-cropped cell images.
+ImageJ workflow: 8-bit → Invert → Measure Mean (whole image)
 
-用法:
-  python3 analyze.py 图片.jpg
-  python3 analyze.py 文件夹/ --watch   # 拖图自动分析
-  python3 analyze.py 文件夹/ --batch   # 批量分析
+Usage:
+  python3 analyze.py image.jpg
+  python3 analyze.py folder/ --watch   # auto-process new images dropped in folder
+  python3 analyze.py folder/ --batch   # batch-process all images in folder
 """
 import sys, os, json, glob, time, argparse
 import numpy as np
