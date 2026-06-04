@@ -1,53 +1,122 @@
 # 凝血定量分析工具
 
-## 三个脚本，对应三种场景
+ImageJ 工作流自动化：**8-bit → Invert → Rectangle ROI → Measure Mean**
 
-| 脚本 | 场景 | 用法 |
-|------|------|------|
-| `full_workflow.py` | **整张玻片照片**：交互框选 → 自动裁切分格 → 热力图 → 多组对比 | `python3 full_workflow.py 玻片照.jpg` |
-| `analyze.py` | **已裁好的方格截图**：拖进去直接分析 | `python3 analyze.py 文件夹/ --watch` |
-| `coagulation_analysis.py` | 全自动（旧版，低对比度图可能不准） | `python3 coagulation_analysis.py 图.jpg` |
+---
 
-## full_workflow.py — 推荐主用
+## 快速开始
 
 ```bash
-# 交互裁切单张玻片
-python3 full_workflow.py 玻片照.jpg --rows 3 --cols 6
+cd /Users/aria/Downloads/chenmeixi
+python3 full_workflow.py 待分析图片/你的图片.JPG --rows 3 --cols 6
+```
 
-# 多组对比（实验组 vs 对照组）
+---
+
+## 操作步骤（每一步会看到什么）
+
+### 第1步：拖矩形框选
+
+弹出一个窗口，显示你的玻片照片。
+
+| 操作 | 效果 |
+|------|------|
+| 鼠标按住拖动 | 画绿色矩形，框住所有方格（别包含刻度线） |
+| 松开鼠标 | 绿色网格线预览出现 |
+| **空格键** | 确认，进入下一步 |
+
+### 第2步：微调确认
+
+弹出预览窗口，绿色网格线叠加在照片上，每格有编号。
+
+| 按键 | 效果 |
+|------|------|
+| **↑ ↓ ← →** | 微调矩形位置 |
+| **+ / -** | 调大/调小每次移动的步长 |
+| **ENTER** | 确认，开始分析 |
+| **ESC** | 重来，回到第1步 |
+
+### 第3步：自动分析
+
+按 ENTER 后全自动完成：
+- 裁切每格图片
+- 8-bit 灰度转换（ImageJ 同款公式）
+- 反色（255 - 灰度）
+- 计算 Mean / Median / Std / IntDen
+
+### 第4步：查看结果
+
+分析完成后自动弹出一个窗口：
+
+| 左边 | 右边 |
+|------|------|
+| 原始照片 + 绿色网格叠加 | 热力图（蓝=低凝血，红=高凝血） |
+
+按**任意键**关闭窗口。
+
+---
+
+## 输出文件
+
+所有结果在图片旁边的 `图片名_analysis/` 文件夹里：
+
+```
+待分析图片/
+├── 你的图片.JPG                          ← 原始照片
+└── 你的图片_analysis/                     ← 分析结果文件夹
+    ├── 你的图片_grid_overlay.png          ← 框选识别结果（黄色矩形+绿色网格+编号）
+    ├── 你的图片_heatmap.png               ← 热力图（每格数值标注，蓝→红=低→高凝血）
+    ├── 你的图片_results.csv               ← 数据表（Excel 直接打开）
+    ├── 你的图片_results.json              ← 完整数据
+    └── cell_01.png ~ cell_18.png          ← 裁好的每格原图
+```
+
+---
+
+## 数据指标
+
+所有指标基于**反色后**灰度值（255 - 原始灰度），**值越高 = 凝血越多**。
+
+| CSV 列名 | ImageJ 对应 | 含义 |
+|----------|------------|------|
+| mean | Mean | 该格平均灰度，**核心指标** |
+| median | — | 中位数 |
+| std | StdDev | 标准差，越大越不均匀 |
+| min / max | Min / Max | 最小/最大灰度 |
+| int_den | IntDen | 积分光密度 = mean × 像素数 |
+| area_px | Area | 该格像素面积 |
+
+---
+
+## 多组对比（实验组 vs 对照组）
+
+```bash
 python3 full_workflow.py 图片文件夹/ --compare --rows 3 --cols 6
 ```
 
-### 操作流程
-1. 拖矩形框住所有方格 → 空格确认
-2. 预览网格 → 任意键确认，ESC 重来
-3. 自动裁切 → ImageJ 精度分析 → 出热力图 + CSV
+会依次让你框选每张玻片，最后生成：
+- `comparison_results.csv` — 所有玻片每格 mean 值横向对比表
+- `comparison_heatmaps.png` — 所有玻片热力图并排
 
-### 输出
-- `*_heatmap.png` — 热力图（蓝=低凝血，红=高凝血）
-- `*_results.csv` — 每格 Mean/Median/Std/IntDen
-- `cell_*.png` — 裁好的每格图片
-- `comparison_results.csv` — 多组对比汇总表（--compare 模式）
+---
 
-## analyze.py — 已有裁切好的方格
+## 其他脚本
 
-```bash
-# 监控模式
-python3 analyze.py 待分析图片/ --watch
+| 脚本 | 用途 |
+|------|------|
+| `full_workflow.py` | **主用**：整张玻片照 → 交互框选 → 裁切分析 |
+| `analyze.py` | 已裁好的单格图片，直接测灰度 |
+| `coagulation_analysis.py` | 旧版全自动检测（低对比度图可能不准） |
 
-# 批量
-python3 analyze.py 待分析图片/ --batch
+---
+
+## 精度说明
+
+灰度转换与 ImageJ 完全一致：
+
+```
+gray = 0.299×R + 0.587×G + 0.114×B
+反色 = 255 - gray
 ```
 
-## 指标说明（反色后，值越高=凝血越多）
-
-| 指标 | 含义 |
-|------|------|
-| Mean | 该格平均灰度，核心指标 |
-| Std | 标准差，反映凝血均匀度 |
-| IntDen | 积分光密度 = Mean × 像素数 |
-
-## 精度对齐
-
-灰度转换使用 ImageJ 完全一致的公式：`gray = 0.299×R + 0.587×G + 0.114×B`
-反色：`255 - gray`
+可与 ImageJ 手动操作结果直接对标。
