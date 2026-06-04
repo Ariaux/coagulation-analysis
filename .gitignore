@@ -2,7 +2,14 @@ __pycache__/
 *.pyc
 *_analysis/
 .DS_Store
-.JPG
+*.jpg
 *.JPG
-*_analysis/
+*.jpeg
 *.png
+*.PNG
+# Ignore images in input folder but keep folder structure
+待分析图片/*.jpg
+待分析图片/*.JPG
+待分析图片/*.jpeg
+待分析图片/*.png
+待分析图片/*.PNG
