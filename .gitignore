@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *_analysis/
 .DS_Store
+.JPG
+*.JPG
+*_analysis/
+*.png

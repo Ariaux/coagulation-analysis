@@ -25,98 +25,123 @@ from datetime import datetime
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SLIDE DETECTION
+#  SLIDE DETECTION — Adaptive: intensity first, texture fallback
 # ═══════════════════════════════════════════════════════════════
 
-def detect_slide(image, slide_fraction=0.30):
+def _intensity_detect(gray):
     """
-    Detect glass slide using texture gradient.
-    Slide = high local variance region (material/texture) vs smooth background.
+    For HIGH-CONTRAST images: slide is clearly brighter/darker than background.
+    Uses Otsu thresholding to find the slide as the largest connected region.
+    Returns (box, method) or None if slide not clearly separable.
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
+    img_area = h * w
 
-    ksize = max(21, min(w, h) // 20) | 1
-    local_mean = cv2.blur(gray.astype(np.float32), (ksize, ksize))
-    local_sq_mean = cv2.blur(gray.astype(np.float32)**2, (ksize, ksize))
-    local_var = local_sq_mean - local_mean**2
-    local_std = np.sqrt(np.maximum(local_var, 0))
+    for thresh_type, invert in [("otsu", False), ("triangle", False)]:
+        try:
+            if thresh_type == "otsu":
+                t, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            else:
+                t, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_TRIANGLE)
 
-    smooth_ksize = max(51, min(w, h) // 8) | 1
-    std_smooth = cv2.GaussianBlur(local_std, (smooth_ksize, smooth_ksize), 0)
+            # Only flip if slide is clearly the minority (slide should be 3-95% of image)
+            white_frac = np.mean(binary) / 255
+            if white_frac < 0.03:
+                binary = cv2.bitwise_not(binary)
 
-    grad_x = cv2.Sobel(std_smooth, cv2.CV_64F, 1, 0, ksize=5)
-    grad_y = cv2.Sobel(std_smooth, cv2.CV_64F, 0, 1, ksize=5)
-    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+            # Clean up
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-    v_profile = grad_mag.sum(axis=0)
-    v_profile = np.convolve(v_profile, np.ones(21)/21, mode='same')
-    h_profile = grad_mag.sum(axis=1)
-    h_profile = np.convolve(h_profile, np.ones(21)/21, mode='same')
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
 
+            largest = max(contours, key=cv2.contourArea)
+            area_ratio = cv2.contourArea(largest) / img_area
+
+            # Slide should be 3-95% of image
+            if 0.03 < area_ratio < 0.95:
+                x, y, rw, rh = cv2.boundingRect(largest)
+                # Check: slide should be roughly centered and large enough
+                center_x, center_y = x + rw//2, y + rh//2
+                if (rw > w*0.10 and rh > h*0.10):
+                    box = np.array([[x, y], [x+rw, y], [x+rw, y+rh], [x, y+rh]], dtype=np.int32)
+                    return box, f"intensity_{thresh_type}"
+        except Exception:
+            continue
+
+    return None
+
+
+def _texture_detect(image):
+    """
+    For LOW-CONTRAST images: slide and background have similar intensity.
+    Uses multi-scale texture (local std) scanning to find slide edges.
+    Returns (box, method) or None.
+    """
+    h, w = image.shape[:2]
+    blue = image[:, :, 0].astype(np.float32)
     cx, cy = w // 2, h // 2
-    search_range = int(min(w, h) * slide_fraction * 1.5)
-    half_size = int(min(w, h) * slide_fraction * 0.6)
 
-    left_x = cx - half_size
-    right_x = cx + half_size
-    top_y = cy - half_size
-    bottom_y = cy + half_size
+    search_half = int(min(w, h) * 0.35)
+    refine_half = int(min(w, h) * 0.10)
 
-    try:
-        lr = slice(max(0, cx-search_range), max(1, cx-search_range//4))
-        if lr.stop > lr.start:
-            p = lr.start + np.argmax(v_profile[lr])
-            if v_profile[p] > v_profile.mean():
-                left_x = p
-    except (ValueError, IndexError): pass
+    edges = {}
+    for scale_name, ksize in [('fine', 15), ('medium', 31), ('coarse', 61)]:
+        mean = cv2.blur(blue, (ksize, ksize))
+        sq_mean = cv2.blur(blue**2, (ksize, ksize))
+        std_map = np.sqrt(np.maximum(sq_mean - mean**2, 0))
+        std_map = cv2.GaussianBlur(std_map, (ksize|1, ksize|1), 0)
 
-    try:
-        rr = slice(min(w-1, cx+search_range//4), min(w-1, cx+search_range))
-        if rr.stop > rr.start:
-            p = rr.start + np.argmax(v_profile[rr])
-            if v_profile[p] > v_profile.mean():
-                right_x = p
-    except (ValueError, IndexError): pass
+        edges[scale_name] = {
+            'left':   _scan_edge(blue, std_map, 'left',   cx, search_half, refine_half),
+            'right':  _scan_edge(blue, std_map, 'right',  cx, search_half, refine_half),
+            'top':    _scan_edge(blue, std_map, 'top',    cy, search_half, refine_half),
+            'bottom': _scan_edge(blue, std_map, 'bottom', cy, search_half, refine_half),
+        }
 
-    try:
-        tr = slice(max(0, cy-search_range), max(1, cy-search_range//4))
-        if tr.stop > tr.start:
-            p = tr.start + np.argmax(h_profile[tr])
-            if h_profile[p] > h_profile.mean():
-                top_y = p
-    except (ValueError, IndexError): pass
+    left_x   = int(np.median([edges[s]['left']   for s in edges]))
+    right_x  = int(np.median([edges[s]['right']  for s in edges]))
+    top_y    = int(np.median([edges[s]['top']    for s in edges]))
+    bottom_y = int(np.median([edges[s]['bottom'] for s in edges]))
 
-    try:
-        br = slice(min(h-1, cy+search_range//4), min(h-1, cy+search_range))
-        if br.stop > br.start:
-            p = br.start + np.argmax(h_profile[br])
-            if h_profile[p] > h_profile.mean():
-                bottom_y = p
-    except (ValueError, IndexError): pass
-
-    det_w, det_h = right_x - left_x, bottom_y - top_y
-    if det_w < 50 or det_h < 50:
-        size = int(min(w, h) * slide_fraction)
-        cx, cy = w//2, h//2
-        half = size//2
-        left_x, right_x = cx-half, cx+half
-        top_y, bottom_y = cy-half, cy+half
-        method = "centered_fallback"
-    else:
-        side = max(det_w, det_h)
-        cx = (left_x + right_x)//2
-        cy = (top_y + bottom_y)//2
-        half = side//2
-        left_x = max(0, cx-half)
-        right_x = min(w, cx+half)
-        top_y = max(0, cy-half)
-        bottom_y = min(h, cy+half)
-        method = "texture_gradient"
+    if right_x - left_x < 50 or bottom_y - top_y < 50:
+        return None
 
     box = np.array([[left_x, top_y], [right_x, top_y],
                      [right_x, bottom_y], [left_x, bottom_y]], dtype=np.int32)
-    return box, method
+    return box, "texture_multiscale"
+
+
+def detect_slide(image, slide_fraction=0.30):
+    """
+    Adaptive slide detection:
+      1. Try intensity-based (Otsu/Triangle) — for high-contrast images
+      2. Fall back to multi-scale texture scanning — for low-contrast images
+      3. Keep natural shape (rectangular OR square — no forced square)
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Strategy 1: Intensity-based (best for high-contrast)
+    result = _intensity_detect(gray)
+    if result is not None:
+        return result
+
+    # Strategy 2: Texture-based (best for low-contrast)
+    result = _texture_detect(image)
+    if result is not None:
+        return result
+
+    # Strategy 3: Centered fallback
+    h, w = image.shape[:2]
+    size = int(min(w, h) * slide_fraction)
+    cx, cy = w // 2, h // 2
+    half = size // 2
+    box = np.array([[cx-half, cy-half], [cx+half, cy-half],
+                     [cx+half, cy+half], [cx-half, cy+half]], dtype=np.int32)
+    return box, "centered_fallback"
 
 
 def manual_roi_gui(image):
@@ -155,14 +180,42 @@ def manual_roi_gui(image):
 #  GRID ANALYSIS
 # ═══════════════════════════════════════════════════════════════
 
+def _scan_edge(channel, std_map, axis, center, search_half, refine_half):
+    """Scan perpendicular to an edge to find background→texture transition."""
+    h, w = channel.shape
+    positions = []
+    if axis == 'left':
+        start, end = max(0, center-search_half), min(w, center+refine_half)
+        bg = np.median(std_map[:, :max(1,start//2)])
+        for row in range(0, h, max(1, h//60)):
+            cross = np.where(std_map[row, start:end] > bg*2.5)[0]
+            if len(cross): positions.append(start + cross[0])
+    elif axis == 'right':
+        start, end = max(0, center-refine_half), min(w, center+search_half)
+        bg = np.median(std_map[:, max(0, w-50):w]) if end >= w-10 else np.median(std_map[:, end+(w-end)//2:min(w, end+(w-end))])
+        for row in range(0, h, max(1, h//60)):
+            cross = np.where(std_map[row, start:end][::-1] > bg*2.5)[0]
+            if len(cross): positions.append(end - cross[0])
+    elif axis == 'top':
+        start, end = max(0, center-search_half), min(h, center+refine_half)
+        bg = np.median(std_map[:max(1,start//2), :])
+        for col in range(0, w, max(1, w//60)):
+            cross = np.where(std_map[start:end, col] > bg*2.5)[0]
+            if len(cross): positions.append(start + cross[0])
+    elif axis == 'bottom':
+        start, end = max(0, center-refine_half), min(h, center+search_half)
+        bg = np.median(std_map[max(0, h-50):h, :]) if end >= h-10 else np.median(std_map[end+(h-end)//2:min(h, end+(h-end)), :])
+        for col in range(0, w, max(1, w//60)):
+            cross = np.where(std_map[start:end, col][::-1] > bg*2.5)[0]
+            if len(cross): positions.append(end - cross[0])
+    return int(np.median(positions)) if positions else (start + end)//2 if axis in ('left','top') else (start + end)//2
+
+
 def extract_slide_roi(image, box):
-    """Extract square slide region."""
+    """Extract slide region — keeps natural shape (rectangular OR square)."""
     x, y, rw, rh = cv2.boundingRect(box)
-    side = max(rw, rh)
-    cx, cy = x + rw//2, y + rh//2
-    half = side//2
-    x1, y1 = max(0, cx-half), max(0, cy-half)
-    x2, y2 = min(image.shape[1], cx+half), min(image.shape[0], cy+half)
+    x1, y1 = max(0, x), max(0, y)
+    x2, y2 = min(image.shape[1], x+rw), min(image.shape[0], y+rh)
     return image[y1:y2, x1:x2], (x1, y1, x2, y2)
 
 
@@ -189,8 +242,9 @@ def find_grid_area(roi_gray):
     if contours:
         largest = max(contours, key=cv2.contourArea)
         gx, gy, gw, gh = cv2.boundingRect(largest)
-        # Ensure reasonable size
-        if gw > w * 0.3 and gh > h * 0.3:
+        # Ensure reasonable size (use smaller dimension ratio)
+        min_dim = min(w, h)
+        if gw > min_dim * 0.3 and gh > min_dim * 0.3:
             return gx, gy, gw, gh
     # Fallback: use entire ROI with 10% margin trimmed
     return int(w*0.05), int(h*0.05), int(w*0.9), int(h*0.9)
@@ -337,8 +391,7 @@ def process_image(image_path, args):
     else:
         box, method = detect_slide(image, args.size)
     xb, yb, rwb, rhb = cv2.boundingRect(box)
-    side = max(rwb, rhb)
-    print(f"  [2/4] Slide ROI: {side}×{side} px ({method})")
+    print(f"  [2/4] Slide ROI: {rwb}×{rhb} px ({method})")
 
     # Step 3: Extract + Grid
     roi, bounds = extract_slide_roi(image, box)
@@ -348,7 +401,7 @@ def process_image(image_path, args):
     # Save detection image
     det_img = image.copy()
     cv2.drawContours(det_img, [box], 0, (0, 255, 0), 3)
-    cv2.putText(det_img, f"Slide: {side}x{side}px | Grid: {n_rows}x{n_cols}",
+    cv2.putText(det_img, f"Slide: {rwb}x{rhb}px | Grid: {n_rows}x{n_cols}",
                 (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
     cv2.imwrite(os.path.join(output_dir, f"{image_name}_detection.png"), det_img)
 
@@ -361,7 +414,7 @@ def process_image(image_path, args):
         "image": image_name,
         "timestamp": datetime.now().isoformat(),
         "grid": {"rows": n_rows, "cols": n_cols, "total_cells": n_rows * n_cols},
-        "slide_roi_size_px": roi.shape[1],
+        "slide_roi_size_px": f"{roi.shape[1]}x{roi.shape[0]}",
         "detection_method": method,
         "cells": cells,
     }
