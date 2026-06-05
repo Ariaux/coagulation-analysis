@@ -8,36 +8,35 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy
       - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
-      - run: Compress-Archive -Path dist/CoagulationAnalysis/* -DestinationPath CoagulationAnalysis-Windows.zip
-      - uses: softprops/action-gh-release@v1
-        with:
-          files: CoagulationAnalysis-Windows.zip
-          tag_name: v1.0
-          name: "Coagulation Analysis"
-          body: "Download the zip, unzip, drag a slide image onto CoagulationAnalysis.exe to analyze."
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install pyinstaller opencv-python numpy
-      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
-      - run: cd dist && zip -r ../../CoagulationAnalysis-Mac.zip CoagulationAnalysis.app
-      - uses: softprops/action-gh-release@v1
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/CoagulationAnalysis/* -DestinationPath CoagulationAnalysis-Windows.zip
+
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ls -la dist/
+          cd dist && zip -r ../CoagulationAnalysis-Mac.zip .
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: CoagulationAnalysis-Mac.zip
-          tag_name: v1.0
+          files: CoagulationAnalysis-${{ runner.os == 'Windows' && 'Windows' || 'Mac' }}.zip
+          tag_name: latest
+          name: "Coagulation Analysis"
+          body: "Latest build. Download, unzip, drag a slide image onto the executable.\n\nWindows: CoagulationAnalysis.exe\nMac: CoagulationAnalysis"
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
