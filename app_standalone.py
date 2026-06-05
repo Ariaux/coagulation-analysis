@@ -90,10 +90,17 @@ def _main():
         input("File not found. Press Enter to exit.")
         sys.exit(1)
 
+    # imread fails on Windows with non-ASCII paths; use numpy fallback
     img = cv2.imread(path)
     if img is None:
-        log(f"Cannot open image: {path}")
-        input("Cannot open image. Press Enter to exit.")
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception:
+            pass
+    if img is None:
+        log(f"Cannot open image (try renaming file to English path): {path}")
+        input("Cannot open image. Try moving it to Desktop and renaming to a simple English name. Press Enter to exit.")
         sys.exit(1)
 
     h, w = img.shape[:2]
