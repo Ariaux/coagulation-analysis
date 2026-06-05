@@ -1,16 +1,21 @@
+# Python
 __pycache__/
 *.pyc
-*_analysis/
+*.pyo
+.venv/
+
+# macOS
 .DS_Store
+.AppleDouble
+
+# Output
+*_analysis/
+
+# Images (tracked via git add -f when needed)
 *.jpg
-*.JPG
 *.jpeg
 *.png
-*.PNG
-# Ignore images in input folder but keep folder structure
+
 input/*.jpg
-input/*.JPG
 input/*.jpeg
 input/*.png
-input/*.PNG
-.venv/
