@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -14,17 +17,12 @@ jobs:
       - run: pip install pyinstaller opencv-python numpy
       - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
       - run: Compress-Archive -Path dist/CoagulationAnalysis/* -DestinationPath CoagulationAnalysis-Windows.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CoagulationAnalysis-Windows
-          path: CoagulationAnalysis-Windows.zip
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
+      - uses: softprops/action-gh-release@v1
         with:
           files: CoagulationAnalysis-Windows.zip
           tag_name: v1.0
-          name: "Coagulation Analysis v1.0"
-          body: "Download, unzip, drag an image onto CoagulationAnalysis.exe"
+          name: "Coagulation Analysis"
+          body: "Download the zip, unzip, drag a slide image onto CoagulationAnalysis.exe to analyze."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -36,15 +34,10 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy
       - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
-      - run: cd dist && zip -r CoagulationAnalysis-Mac.zip CoagulationAnalysis.app
-      - uses: actions/upload-artifact@v4
+      - run: cd dist && zip -r ../../CoagulationAnalysis-Mac.zip CoagulationAnalysis.app
+      - uses: softprops/action-gh-release@v1
         with:
-          name: CoagulationAnalysis-Mac
-          path: dist/CoagulationAnalysis-Mac.zip
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: dist/CoagulationAnalysis-Mac.zip
+          files: CoagulationAnalysis-Mac.zip
           tag_name: v1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
