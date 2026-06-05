@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy
-      - run: pyinstaller --onedir --windowed --name "CoagulationAnalysis" app_standalone.py
+      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
       - uses: actions/upload-artifact@v4
         with:
           name: CoagulationAnalysis-Mac
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy
-      - run: pyinstaller --onedir --windowed --name "CoagulationAnalysis" app_standalone.py
+      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
       - uses: actions/upload-artifact@v4
         with:
           name: CoagulationAnalysis-Windows
