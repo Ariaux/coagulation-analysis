@@ -13,3 +13,4 @@ input/*.JPG
 input/*.jpeg
 input/*.png
 input/*.PNG
+.venv/
