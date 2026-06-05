@@ -1,0 +1,33 @@
+name: Build Standalone App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyinstaller opencv-python numpy
+      - run: pyinstaller --onedir --windowed --name "CoagulationAnalysis" app_standalone.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoagulationAnalysis-Mac
+          path: dist/CoagulationAnalysis.app
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyinstaller opencv-python numpy
+      - run: pyinstaller --onedir --windowed --name "CoagulationAnalysis" app_standalone.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoagulationAnalysis-Windows
+          path: dist/CoagulationAnalysis/

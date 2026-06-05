@@ -1,5 +1,7 @@
-# Python
-__pycache__/
+# Build artifacts
+build/
+dist/
+*.spec
 *.pyc
 *.pyo
 .venv/
