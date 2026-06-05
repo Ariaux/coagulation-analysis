@@ -1,24 +1,10 @@
-name: Build Standalone App
+name: Build and Release
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install pyinstaller opencv-python numpy
-      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CoagulationAnalysis-Mac
-          path: dist/CoagulationAnalysis.app
-
   build-windows:
     runs-on: windows-latest
     steps:
@@ -27,7 +13,38 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy
       - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
+      - run: Compress-Archive -Path dist/CoagulationAnalysis/* -DestinationPath CoagulationAnalysis-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: CoagulationAnalysis-Windows
-          path: dist/CoagulationAnalysis/
+          path: CoagulationAnalysis-Windows.zip
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: CoagulationAnalysis-Windows.zip
+          tag_name: v1.0
+          name: "Coagulation Analysis v1.0"
+          body: "Download, unzip, drag an image onto CoagulationAnalysis.exe"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyinstaller opencv-python numpy
+      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
+      - run: cd dist && zip -r CoagulationAnalysis-Mac.zip CoagulationAnalysis.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoagulationAnalysis-Mac
+          path: dist/CoagulationAnalysis-Mac.zip
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/CoagulationAnalysis-Mac.zip
+          tag_name: v1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
