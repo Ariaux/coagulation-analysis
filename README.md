@@ -456,4 +456,4 @@ from dl.attention import AttentionGate, SEBlock, CBAM
 - Hu, J., et al. (2018). Squeeze-and-Excitation Networks. *CVPR 2018*.
 - Woo, S., et al. (2018). CBAM: Convolutional Block Attention Module. *ECCV 2018*.
 - Chattopadhyay, A., et al. (2018). Grad-CAM++: Generalized Gradient-Based Visual Explanations. *WACV 2018*.
-- Wang, G., et al. (2020). Test-Time Augmentation for Semantic Segmentation. *arXiv*.
+- Moshkov, N., Mathe, B., Kertesz-Farkas, A., Hollandi, R., & Horvath, P. (2020). Test-time augmentation for deep learning-based cell segmentation on microscopy images. *Scientific Reports*, 10, 5068.
