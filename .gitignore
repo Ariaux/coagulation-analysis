@@ -13,6 +13,10 @@ dist/
 # Output
 *_analysis/
 
+# DL artifacts
+dl/checkpoints/
+dl/logs/
+
 # Images (tracked via git add -f when needed)
 *.jpg
 *.jpeg
