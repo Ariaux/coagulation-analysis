@@ -294,9 +294,18 @@ coagulation-analysis/
 │   ├── config.py              #   Centralized config (data/model/loss/training)
 │   ├── data.py                #   Pseudo-label generation + augmentation + Dataset
 │   ├── model.py               #   CoagNet multi-task network architecture
+│   ├── attention.py           #   Attention gates, SE blocks, CBAM
 │   ├── losses.py              #   Dice Loss + Kendall uncertainty weighting
 │   ├── train.py               #   Two-phase training loop
-│   └── inference.py           #   Inference + visualization + CV comparison
+│   ├── inference.py           #   Inference + visualization + CV comparison
+│   ├── advanced.py            #   TTA, MC Dropout, Ensemble inference
+│   ├── evaluate.py            #   K-fold CV, ablation study, encoder benchmark
+│   └── visualize.py           #   Grad-CAM, t-SNE, confusion matrix, ROC curves
+│
+├── train_dl.py                # DL training entry point
+│
+└── input/                     # Example data
+    └── *_analysis/            #   Analysis output + cell images
 │
 ├── train_dl.py                # DL training entry point
 │
@@ -342,6 +351,96 @@ coagulation-analysis/
 | `--batch` | Process all images in folder |
 | `--watch` | Monitor folder, auto-process new images |
 
+### `dl/evaluate.py`
+
+| Argument | Description |
+|----------|-------------|
+| `--cell-dir` | Directory with cell images |
+| `--k-folds` | Run k-fold cross-validation (e.g. 5) |
+| `--ablation` | Run ablation study |
+| `--benchmark` | Run multi-encoder benchmark |
+| `--quick` | Quick mode (fewer epochs) |
+| `--output` | JSON output path |
+
+---
+
+## Advanced Features
+
+### Grad-CAM Visualization
+
+Generates saliency maps showing which image regions the model focuses on for each class prediction. Uses Grad-CAM (Selvaraju et al., ICCV 2017) and Grad-CAM++ (Chattopadhyay et al., WACV 2018) for fine-grained localization.
+
+```python
+from dl.visualize import GradCAM
+cam = GradCAM(model)
+heatmap = cam.generate(cell_img, target_class=0)
+```
+
+### Test-Time Augmentation (TTA)
+
+Averages predictions across 8 augmented views (flips, rotations) for robust, uncertainty-aware inference. Provides per-pixel prediction variance.
+
+```python
+from dl.advanced import TTAInference
+tta = TTAInference("best_model.pt", num_tta_views=8)
+result = tta.predict(cell_img)
+# result includes seg_uncertainty, reg_uncertainty, cls_uncertainty
+```
+
+### MC Dropout Uncertainty
+
+Estimates epistemic (model) and aleatoric (data) uncertainty via 30 stochastic forward passes with dropout active at test time (Gal & Ghahramani, ICML 2016).
+
+```python
+from dl.advanced import MCDropoutInference
+mc = MCDropoutInference("best_model.pt", num_samples=30)
+result = mc.predict(cell_img)
+mc.visualize_uncertainty(cell_img, save_path="uncertainty.png")
+```
+
+### Ensemble Prediction
+
+Combines multiple model checkpoints (different architectures, seeds, or training epochs) following Deep Ensembles (Lakshminarayanan et al., NeurIPS 2017).
+
+```python
+from dl.advanced import EnsembleInference
+ensemble = EnsembleInference(["resnet50.pt", "efficientnet_b3.pt", "convnext.pt"])
+result = ensemble.predict(cell_img)
+# result includes seg_agreement (inter-model consensus)
+```
+
+### K-Fold Cross-Validation
+
+Stratified k-fold CV with bootstrap confidence intervals for all metrics.
+
+```bash
+python3 -m dl.evaluate --cell-dir input/cells --k-folds 5
+```
+
+### Ablation Study
+
+Systematically removes each component (segmentation head, regression head, classification head, uncertainty weighting, data augmentation, encoder fine-tuning) to quantify contribution.
+
+```bash
+python3 -m dl.evaluate --cell-dir input/cells --ablation
+```
+
+### Multi-Encoder Benchmark
+
+Compares ResNet-34/50/101, EfficientNet-B0/B3, and ConvNeXt-Tiny under identical settings.
+
+```bash
+python3 -m dl.evaluate --cell-dir input/cells --benchmark
+```
+
+### Attention Mechanisms
+
+Attention U-Net gates (Oktay et al., MIDL 2018), Squeeze-and-Excitation (Hu et al., CVPR 2018), and CBAM (Woo et al., ECCV 2018) for enhanced feature refinement.
+
+```python
+from dl.attention import AttentionGate, SEBlock, CBAM
+```
+
 ---
 
 ## References
@@ -350,3 +449,11 @@ coagulation-analysis/
 - Ronneberger, O., Fischer, P., & Brox, T. (2015). U-Net: Convolutional Networks for Biomedical Image Segmentation. *MICCAI 2015*.
 - He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for Image Recognition. *CVPR 2016*.
 - Otsu, N. (1979). A Threshold Selection Method from Gray-Level Histograms. *IEEE Trans. Sys. Man. Cyber.*
+- Selvaraju, R. R., et al. (2017). Grad-CAM: Visual Explanations from Deep Networks. *ICCV 2017*.
+- Oktay, O., et al. (2018). Attention U-Net: Learning Where to Look for the Pancreas. *MIDL 2018*.
+- Gal, Y. & Ghahramani, Z. (2016). Dropout as a Bayesian Approximation. *ICML 2016*.
+- Lakshminarayanan, B., et al. (2017). Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles. *NeurIPS 2017*.
+- Hu, J., et al. (2018). Squeeze-and-Excitation Networks. *CVPR 2018*.
+- Woo, S., et al. (2018). CBAM: Convolutional Block Attention Module. *ECCV 2018*.
+- Chattopadhyay, A., et al. (2018). Grad-CAM++: Generalized Gradient-Based Visual Explanations. *WACV 2018*.
+- Wang, G., et al. (2020). Test-Time Augmentation for Semantic Segmentation. *arXiv*.
