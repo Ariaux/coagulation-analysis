@@ -18,10 +18,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pyinstaller opencv-python numpy matplotlib
-      - name: Test and compile
-        run: |
-          python -m unittest discover -s tests -v
-          python -m py_compile app_standalone.py grid_detector.py research/__init__.py research/annotate_inner_squares.py research/evaluate_cropping.py
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile Python modules
+        run: python -m py_compile app_standalone.py grid_detector.py research/__init__.py research/annotate_inner_squares.py research/evaluate_cropping.py
       - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
 
       - name: Zip (Windows)
