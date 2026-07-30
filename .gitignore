@@ -5,6 +5,7 @@ dist/
 *.pyc
 *.pyo
 .venv/
+.worktrees/
 
 # macOS
 .DS_Store
