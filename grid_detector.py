@@ -153,7 +153,8 @@ def _ridge(
         right += 1
     center = low + (left + right) / 2.0
     thickness = float(right - left + 1)
-    return center, thickness, min(1.0, peak)
+    strength = float(np.clip(peak - baseline, 0.0, 1.0))
+    return center, thickness, strength
 
 
 def _refine_template_squares(
@@ -235,9 +236,7 @@ def _refine_template_squares(
 
             if x1 <= x0 or y1 <= y0:
                 continue
-            candidates.append(
-                _Candidate((x0, y0, x1 - x0, y1 - y0), strength)
-            )
+            candidates.append(_Candidate((x0, y0, x1, y1), strength))
     return candidates
 
 
@@ -258,14 +257,20 @@ def _validate_grid(
             "Retake the photo with all cells unobstructed."
         )
 
-    widths = np.array([candidate.bbox[2] for candidate in raw], dtype=float)
-    heights = np.array([candidate.bbox[3] for candidate in raw], dtype=float)
+    widths = np.array(
+        [candidate.bbox[2] - candidate.bbox[0] for candidate in raw],
+        dtype=float,
+    )
+    heights = np.array(
+        [candidate.bbox[3] - candidate.bbox[1] for candidate in raw],
+        dtype=float,
+    )
     median_width = float(np.median(widths))
     median_height = float(np.median(heights))
     centers = np.array(
         [
-            (x + width / 2.0, y + height / 2.0)
-            for x, y, width, height in (candidate.bbox for candidate in raw)
+            ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            for x1, y1, x2, y2 in (candidate.bbox for candidate in raw)
         ]
     ).reshape(3, 3, 2)
 
@@ -288,7 +293,9 @@ def _validate_grid(
         )
 
     for candidate in raw:
-        _, _, width, height = candidate.bbox
+        x1, y1, x2, y2 = candidate.bbox
+        width = x2 - x1
+        height = y2 - y1
         aspect = min(width, height) / max(width, height)
         size_agreement = 1.0 - max(
             abs(width - median_width) / median_width,
@@ -320,9 +327,9 @@ def _map_squares(
     source_height, source_width = source_shape[:2]
     squares = []
     for position, candidate in enumerate(candidates):
-        x, y, width, height = candidate.bbox
+        x1, y1, x2, y2 = candidate.bbox
         rectified_corners = np.array(
-            [[[x, y], [x + width, y], [x + width, y + height], [x, y + height]]],
+            [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]],
             dtype=np.float32,
         )
         source_quad = cv2.perspectiveTransform(
@@ -341,7 +348,7 @@ def _map_squares(
                 row=row + 1,
                 col=col + 1,
                 source_quad=source_quad,
-                source_bbox=(left, top, right - left, bottom - top),
+                source_bbox=(left, top, right, bottom),
                 rectified_bbox=candidate.bbox,
                 confidence=candidate.confidence,
                 recovered=candidate.recovered,

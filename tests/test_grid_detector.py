@@ -57,8 +57,8 @@ def make_fixture(
                 (
                     content_left,
                     content_top,
-                    content_right - content_left,
-                    content_bottom - content_top,
+                    content_right,
+                    content_bottom,
                 )
             )
 
@@ -99,6 +99,10 @@ class GridDetectorTests(unittest.TestCase):
             [(square.row, square.col) for square in detection.squares],
         )
         for square, truth in zip(detection.squares, expected):
+            x1, y1, x2, y2 = square.rectified_bbox
+            content = detection.rectified[y1:y2, x1:x2]
+            self.assertGreater(content.shape[1], detection.rectified.shape[1] * 0.15)
+            self.assertGreater(content.shape[0], detection.rectified.shape[0] * 0.15)
             coordinate_error = max(
                 abs(actual - wanted)
                 for actual, wanted in zip(square.source_bbox, truth)
@@ -115,6 +119,21 @@ class GridDetectorTests(unittest.TestCase):
         self.assertGreaterEqual(
             min(square.confidence for square in detection.squares), 0.55
         )
+
+    def test_rejects_solid_dark_area_without_inner_edge_structure(self):
+        size = 900
+        image = np.full((size, size, 3), 210, dtype=np.uint8)
+        margin = int(round(size * 0.04))
+        cv2.rectangle(
+            image,
+            (margin, margin),
+            (size - margin, size - margin),
+            (25, 25, 25),
+            -1,
+        )
+
+        with self.assertRaises(DetectionError):
+            detect_inner_squares(image)
 
 
 if __name__ == "__main__":
