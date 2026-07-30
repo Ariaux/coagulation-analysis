@@ -5,6 +5,7 @@ dist/
 *.pyc
 *.pyo
 .venv/
+.worktrees/
 
 # macOS
 .DS_Store
@@ -16,6 +17,7 @@ dist/
 # DL artifacts
 dl/checkpoints/
 dl/logs/
+research/results/
 
 # Images (tracked via git add -f when needed)
 *.jpg
