@@ -257,6 +257,16 @@ class GridDetectorTests(unittest.TestCase):
             min(square.confidence for square in detection.squares), 0.55
         )
 
+    def test_detects_valid_fixtures_near_minimum_image_size(self):
+        for size in (200, 250, 280, 300):
+            for filled in ((), (1, 2, 4, 5, 8)):
+                with self.subTest(size=size, filled=filled):
+                    image, _ = make_fixture(size=size, filled=filled)
+
+                    detection = detect_inner_squares(image)
+
+                    self.assertEqual(9, len(detection.squares))
+
     def test_sample_content_does_not_move_inner_square_edges(self):
         for size in (900, 1200, 1400):
             with self.subTest(size=size):

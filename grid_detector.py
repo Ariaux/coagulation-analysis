@@ -286,6 +286,36 @@ def _edge_continuity(
     return coverage, longest_run / float(signal.size)
 
 
+def _outward_edge_contrast(
+    darkness: np.ndarray,
+    expected: float,
+    radius: int,
+    axis: int,
+    inner_direction: int,
+    span_start: int,
+    span_end: int,
+) -> float:
+    perpendicular_limit = darkness.shape[1] if axis == 0 else darkness.shape[0]
+    half_band = max(1, min(3, int(round(radius * 0.25))))
+
+    def band_mean(center: float) -> float:
+        middle = int(round(center))
+        start = max(0, middle - half_band)
+        end = min(perpendicular_limit, middle + half_band + 1)
+        if axis == 0:
+            band = darkness[span_start:span_end, start:end]
+        else:
+            band = darkness[start:end, span_start:span_end]
+        return float(np.mean(band)) if band.size else 0.0
+
+    ridge_darkness = band_mean(expected)
+    baseline_distance = radius + half_band + 1
+    outward_baseline = band_mean(
+        expected - inner_direction * baseline_distance
+    )
+    return float(np.clip(ridge_darkness - outward_baseline, 0.0, 1.0))
+
+
 def _validate_fixture_structure(rectified: np.ndarray) -> None:
     gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(
@@ -317,8 +347,8 @@ def _refine_template_squares(
     height, width = gray.shape
     cell_x = width / 3.0
     cell_y = height / 3.0
-    radius_x = max(2, int(round(cell_x * 0.07)))
-    radius_y = max(2, int(round(cell_y * 0.07)))
+    radius_x = max(6, int(round(cell_x * 0.07)))
+    radius_y = max(6, int(round(cell_y * 0.07)))
     candidates: list[_Candidate] = []
 
     for row in range(3):
@@ -389,6 +419,58 @@ def _refine_template_squares(
                 vertical_span_end = min(height, int((row + 0.80) * cell_y))
                 horizontal_span_start = max(0, int((col + 0.20) * cell_x))
                 horizontal_span_end = min(width, int((col + 0.80) * cell_x))
+                contrast_vertical_start = max(0, int((row + 0.32) * cell_y))
+                contrast_vertical_end = min(height, int((row + 0.68) * cell_y))
+                contrast_horizontal_start = max(0, int((col + 0.32) * cell_x))
+                contrast_horizontal_end = min(width, int((col + 0.68) * cell_x))
+                left_strength = max(
+                    left_strength,
+                    _outward_edge_contrast(
+                        darkness,
+                        predicted_left,
+                        radius_x,
+                        0,
+                        1,
+                        contrast_vertical_start,
+                        contrast_vertical_end,
+                    ),
+                )
+                right_strength = max(
+                    right_strength,
+                    _outward_edge_contrast(
+                        darkness,
+                        predicted_right,
+                        radius_x,
+                        0,
+                        -1,
+                        contrast_vertical_start,
+                        contrast_vertical_end,
+                    ),
+                )
+                top_strength = max(
+                    top_strength,
+                    _outward_edge_contrast(
+                        darkness,
+                        predicted_top,
+                        radius_y,
+                        1,
+                        1,
+                        contrast_horizontal_start,
+                        contrast_horizontal_end,
+                    ),
+                )
+                bottom_strength = max(
+                    bottom_strength,
+                    _outward_edge_contrast(
+                        darkness,
+                        predicted_bottom,
+                        radius_y,
+                        1,
+                        -1,
+                        contrast_horizontal_start,
+                        contrast_horizontal_end,
+                    ),
+                )
                 left_coverage, left_run = _edge_continuity(
                     dark_mask,
                     left,
@@ -421,10 +503,16 @@ def _refine_template_squares(
                     horizontal_span_end,
                     bottom_width,
                 )
-                x0 = int(round(left + left_width / 2.0 + 2))
-                x1 = int(round(right - right_width / 2.0 - 2))
-                y0 = int(round(top + top_width / 2.0 + 2))
-                y1 = int(round(bottom - bottom_width / 2.0 - 2))
+                if min(cell_x, cell_y) < 100.0:
+                    x0 = int(round(predicted_left + 2))
+                    x1 = int(round(predicted_right - 2))
+                    y0 = int(round(predicted_top + 2))
+                    y1 = int(round(predicted_bottom - 2))
+                else:
+                    x0 = int(round(left + left_width / 2.0 + 2))
+                    x1 = int(round(right - right_width / 2.0 - 2))
+                    y0 = int(round(top + top_width / 2.0 + 2))
+                    y1 = int(round(bottom - bottom_width / 2.0 - 2))
                 edge_strengths = (
                     left_strength,
                     right_strength,
@@ -504,12 +592,22 @@ def _validate_grid(
         ]
     ).reshape(3, 3, 2)
 
-    if np.any((widths / heights < 0.85) | (widths / heights > 1.15)):
+    quantization_slack = 6.0
+    aspect_differences = np.abs(widths - heights)
+    aspect_tolerances = np.maximum(
+        0.15 * np.maximum(widths, heights),
+        quantization_slack,
+    )
+    if np.any(aspect_differences > aspect_tolerances):
         raise DetectionError(
             "The inner frames are too distorted. Use a more front-facing photo."
         )
-    if np.any(np.abs(widths - median_width) > median_width * 0.15) or np.any(
-        np.abs(heights - median_height) > median_height * 0.15
+    if np.any(
+        np.abs(widths - median_width)
+        > max(median_width * 0.15, quantization_slack)
+    ) or np.any(
+        np.abs(heights - median_height)
+        > max(median_height * 0.15, quantization_slack)
     ):
         raise DetectionError(
             "The detected inner frames have inconsistent sizes. "
