@@ -198,6 +198,7 @@ def _ridge(
     expected: float,
     radius: int,
     axis: int,
+    inner_direction: int,
     pieces: tuple[tuple[int, int], ...],
 ) -> tuple[float, float, float]:
     (
@@ -224,8 +225,12 @@ def _ridge(
         and width_projection[right + 1] >= threshold
     ):
         right += 1
-    center = low + (left + right) / 2.0
-    thickness = float(right - left + 1)
+    if inner_direction > 0:
+        center = low + (left + peak_offset) / 2.0
+        thickness = float(peak_offset - left + 1)
+    else:
+        center = low + (peak_offset + right) / 2.0
+        thickness = float(right - peak_offset + 1)
     piece_strengths = (
         0.75
         * (
@@ -330,10 +335,6 @@ def _refine_template_squares(
                         min(height, int((row + 0.30) * cell_y)),
                     ),
                     (
-                        max(0, int((row + 0.43) * cell_y)),
-                        min(height, int((row + 0.57) * cell_y)),
-                    ),
-                    (
                         max(0, int((row + 0.70) * cell_y)),
                         min(height, int((row + 0.80) * cell_y)),
                     ),
@@ -342,10 +343,6 @@ def _refine_template_squares(
                     (
                         max(0, int((col + 0.20) * cell_x)),
                         min(width, int((col + 0.30) * cell_x)),
-                    ),
-                    (
-                        max(0, int((col + 0.43) * cell_x)),
-                        min(width, int((col + 0.57) * cell_x)),
                     ),
                     (
                         max(0, int((col + 0.70) * cell_x)),
@@ -358,6 +355,7 @@ def _refine_template_squares(
                     predicted_left,
                     radius_x,
                     0,
+                    1,
                     vertical_pieces,
                 )
                 right, right_width, right_strength = _ridge(
@@ -366,6 +364,7 @@ def _refine_template_squares(
                     predicted_right,
                     radius_x,
                     0,
+                    -1,
                     vertical_pieces,
                 )
                 top, top_width, top_strength = _ridge(
@@ -373,6 +372,7 @@ def _refine_template_squares(
                     dark_mask,
                     predicted_top,
                     radius_y,
+                    1,
                     1,
                     horizontal_pieces,
                 )
@@ -382,6 +382,7 @@ def _refine_template_squares(
                     predicted_bottom,
                     radius_y,
                     1,
+                    -1,
                     horizontal_pieces,
                 )
                 vertical_span_start = max(0, int((row + 0.20) * cell_y))

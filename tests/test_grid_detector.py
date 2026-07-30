@@ -258,22 +258,27 @@ class GridDetectorTests(unittest.TestCase):
         )
 
     def test_sample_content_does_not_move_inner_square_edges(self):
-        empty, _ = make_fixture()
-        filled, _ = make_fixture(filled=(1, 2, 4, 5, 8))
-
-        empty_detection = detect_inner_squares(empty)
-        filled_detection = detect_inner_squares(filled)
-
-        for empty_square, filled_square in zip(
-            empty_detection.squares, filled_detection.squares
-        ):
-            coordinate_delta = max(
-                abs(empty_coordinate - filled_coordinate)
-                for empty_coordinate, filled_coordinate in zip(
-                    empty_square.source_bbox, filled_square.source_bbox
+        for size in (900, 1200, 1400):
+            with self.subTest(size=size):
+                empty, _ = make_fixture(size=size)
+                filled, _ = make_fixture(
+                    size=size, filled=(1, 2, 4, 5, 8)
                 )
-            )
-            self.assertLessEqual(coordinate_delta, 5)
+
+                empty_detection = detect_inner_squares(empty)
+                filled_detection = detect_inner_squares(filled)
+
+                for empty_square, filled_square in zip(
+                    empty_detection.squares, filled_detection.squares
+                ):
+                    coordinate_delta = max(
+                        abs(empty_coordinate - filled_coordinate)
+                        for empty_coordinate, filled_coordinate in zip(
+                            empty_square.source_bbox,
+                            filled_square.source_bbox,
+                        )
+                    )
+                    self.assertLessEqual(coordinate_delta, 5)
 
     def test_tolerates_small_rotations_and_brightness_changes(self):
         for angle in (-4.0, 3.0):
