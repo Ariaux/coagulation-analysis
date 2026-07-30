@@ -13,7 +13,8 @@ The three primary methods are:
 2. **Contour only** — rectify the fixture and select a plausible near-square
    contour independently in each cell, without shared-grid recovery.
 3. **Hybrid** — use the normal detector, including rectification, local edge
-   refinement, and grid validation/recovery.
+   refinement, grid validation, and recovery of at most one globally unique
+   weak inner edge. Structural or multiple-edge failures are never recovered.
 
 ## Reference labels
 
@@ -34,11 +35,21 @@ valid boxes, and Escape cancels. The tool does not create automatic prelabels
 and does not use a network service.
 
 For real data, keep original images under an untracked `research/real_data/`
-directory and store reviewed annotation JSON beside each image. A future
-real-data manifest should be UTF-8 CSV with `case,image,annotations,condition,level`
-columns and paths relative to the manifest. The current command-line evaluator
-intentionally accepts synthetic data only; real-image evaluation should not be
-added until manifest validation and provenance checks are implemented.
+directory and store reviewed annotation JSON beside each image. Supply a UTF-8
+CSV manifest with the exact columns
+`case,image,annotations,condition,level`; image and annotation paths are
+relative to the manifest:
+
+```csv
+case,image,annotations,condition,level
+photo-001,images/photo-001.png,labels/photo-001.json,lighting,normal
+```
+
+Case IDs must be nonempty and unique. Each image must decode successfully and
+be at least 600×600 pixels. Each annotation must name the image basename
+exactly, retain `annotator: "manual"`, and contain exactly nine valid,
+row-major boxes. The evaluator rejects missing, malformed, mismatched,
+non-manual, or duplicate inputs; algorithm-generated truth is prohibited.
 
 Two people should independently review a representative subset of labels. Any
 disagreement should be resolved before evaluation, with the final reviewed
@@ -98,6 +109,14 @@ python -m research.evaluate_cropping --synthetic \
   --output research/results/ablations-new --ablations
 ```
 
+Run independently labeled images, with or without `--ablations`:
+
+```bash
+python -m research.evaluate_cropping \
+  --manifest research/real_data/manifest.csv \
+  --output research/results/manual-new
+```
+
 The output directory must be new or empty. The evaluator refuses a nonempty
 directory and never deletes previous results; choose a fresh name for every run.
 
@@ -117,8 +136,9 @@ Each output directory contains:
   counterbalance order effects;
 - `method_comparison.png` — method-level IoU comparison;
 - `robustness_by_condition.png` — condition-level robustness comparison;
-- `failures/` — truth/prediction overlays for failures and incomplete
-  all-nine results.
+- `failures/` — research-only truth/prediction comparison overlays for failed
+  methods and incomplete all-nine results. These are evaluation artifacts, not
+  partial production results.
 
 ## Results
 

@@ -1,3 +1,4 @@
+import csv
 import json
 import tempfile
 import unittest
@@ -18,12 +19,147 @@ from research.evaluate_cropping import (
     box_iou,
     evaluate_methods,
     fixed_ratio_detector,
+    load_labeled_manifest,
     make_perturbations,
 )
 from tests.test_grid_detector import make_fixture
 
 
 class ResearchEvaluationTests(unittest.TestCase):
+    def _write_manifest_fixture(self, root, image_name="真实样本.png"):
+        image, truth = make_fixture(filled=(2, 5, 8))
+        data = root / "数据"
+        data.mkdir()
+        image_path = data / image_name
+        success, encoded = cv2.imencode(".png", image)
+        self.assertTrue(success)
+        encoded.tofile(str(image_path))
+        annotations_path = data / "人工标注.json"
+        save_annotations(annotations_path, image_name, truth)
+        manifest = root / "清单.csv"
+        with manifest.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=["case", "image", "annotations", "condition", "level"],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "case": "真实-001",
+                    "image": "数据/" + image_name,
+                    "annotations": "数据/人工标注.json",
+                    "condition": "lighting",
+                    "level": "normal",
+                }
+            )
+        return manifest, image, tuple(truth)
+
+    def test_load_labeled_manifest_accepts_relative_unicode_manual_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, image, truth = self._write_manifest_fixture(Path(directory))
+
+            cases = load_labeled_manifest(manifest)
+
+            self.assertEqual(1, len(cases))
+            self.assertEqual("真实-001", cases[0].name)
+            self.assertEqual("lighting", cases[0].condition)
+            self.assertEqual("normal", cases[0].level)
+            self.assertEqual(truth, cases[0].truth)
+            np.testing.assert_array_equal(image, cases[0].image)
+
+    def test_load_labeled_manifest_requires_exact_ordered_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _, _ = self._write_manifest_fixture(root)
+            manifest.write_text(
+                "image,case,annotations,condition,level\n"
+                "数据/真实样本.png,真实-001,数据/人工标注.json,lighting,normal\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "columns"):
+                load_labeled_manifest(manifest)
+
+    def test_load_labeled_manifest_rejects_untrusted_or_invalid_inputs(self):
+        mutations = (
+            ("missing image", lambda root, row, payload: row.update(image="missing.png")),
+            (
+                "filename mismatch",
+                lambda root, row, payload: payload.update(image="different.png"),
+            ),
+            (
+                "non-manual",
+                lambda root, row, payload: payload.update(annotator="algorithm"),
+            ),
+            (
+                "absolute image path",
+                lambda root, row, payload: row.update(
+                    image=str(root / row["image"])
+                ),
+            ),
+            (
+                "non-integer coordinate",
+                lambda root, row, payload: payload["boxes"][0].update(
+                    bbox=["10", 20, 80, 90]
+                ),
+            ),
+            ("empty case", lambda root, row, payload: row.update(case="")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest, _, _ = self._write_manifest_fixture(root)
+                with manifest.open(encoding="utf-8", newline="") as stream:
+                    row = next(csv.DictReader(stream))
+                annotations = root / row["annotations"]
+                payload = json.loads(annotations.read_text("utf-8"))
+                mutate(root, row, payload)
+                annotations.write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                )
+                with manifest.open("w", encoding="utf-8", newline="") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(row))
+                    writer.writeheader()
+                    writer.writerow(row)
+                with self.assertRaises(ValueError):
+                    load_labeled_manifest(manifest)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _, _ = self._write_manifest_fixture(root)
+            with manifest.open(encoding="utf-8", newline="") as stream:
+                row = next(csv.DictReader(stream))
+            with manifest.open("a", encoding="utf-8", newline="") as stream:
+                csv.DictWriter(stream, fieldnames=list(row)).writerow(row)
+            with self.assertRaisesRegex(ValueError, "(?i)duplicate"):
+                load_labeled_manifest(manifest)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _, _ = self._write_manifest_fixture(root)
+            with manifest.open(encoding="utf-8", newline="") as stream:
+                row = next(csv.DictReader(stream))
+            small = np.full((599, 900, 3), 255, np.uint8)
+            success, encoded = cv2.imencode(".png", small)
+            self.assertTrue(success)
+            encoded.tofile(str(root / row["image"]))
+            with self.assertRaisesRegex(ValueError, "600"):
+                load_labeled_manifest(manifest)
+
+    def test_manifest_cli_writes_evaluation_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _, _ = self._write_manifest_fixture(root)
+            output = root / "results"
+
+            status = evaluation.main(
+                ["--manifest", str(manifest), "--output", str(output), "--ablations"]
+            )
+
+            self.assertEqual(0, status)
+            self.assertTrue((output / "per_image_results.csv").is_file())
+            self.assertTrue((output / "summary.json").is_file())
+
     def test_box_metrics_use_xyxy_coordinates(self):
         truth = (10, 20, 110, 120)
         shifted = (15, 20, 115, 120)

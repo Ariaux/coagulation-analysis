@@ -6,11 +6,16 @@ Usage: drag an image file onto the app icon, or:
        CoagulationAnalysis.exe image.jpg
 """
 import csv
+import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
+import uuid
 
 import numpy as np
 import cv2
@@ -126,6 +131,18 @@ def save_results(out_dir, artifact_key, original_filename, results):
         "area_px",
         "confidence",
         "recovered",
+        "source_bbox_x1",
+        "source_bbox_y1",
+        "source_bbox_x2",
+        "source_bbox_y2",
+        "quad_1_x",
+        "quad_1_y",
+        "quad_2_x",
+        "quad_2_y",
+        "quad_3_x",
+        "quad_3_y",
+        "quad_4_x",
+        "quad_4_y",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
@@ -145,6 +162,12 @@ def save_results(out_dir, artifact_key, original_filename, results):
                     result["area_px"],
                     result["confidence"],
                     result["recovered"],
+                    *result["source_bbox"],
+                    *[
+                        coordinate
+                        for point in result["crop_quad"]
+                        for coordinate in point
+                    ],
                 ]
             )
 
@@ -155,6 +178,15 @@ def save_results(out_dir, artifact_key, original_filename, results):
             indent=2,
         )
     return csv_path, json_path
+
+
+def _artifact_key(filename):
+    stem, extension = os.path.splitext(filename)
+    readable = "_".join(part for part in (stem, extension.lstrip(".")) if part)
+    readable = re.sub(r"[^\w-]+", "_", readable, flags=re.UNICODE).strip("_")
+    readable = readable[:80] or "image"
+    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()[:10]
+    return f"{readable}_{digest}"
 
 
 def show_results(overlay, heatmap, base_name):
@@ -199,58 +231,80 @@ def process_image(path, show_windows=True, open_folder=True):
 
     detection = detect_inner_squares(img)
     original_filename = os.path.basename(path)
-    base_name, extension = os.path.splitext(original_filename)
-    extension_key = extension.lstrip(".").lower()
-    artifact_key = (
-        f"{base_name}_{extension_key}" if extension_key else base_name
+    artifact_key = _artifact_key(original_filename)
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    out_dir = os.path.join(parent_dir, f"{artifact_key}_analysis")
+    staging_dir = tempfile.mkdtemp(
+        prefix=f".{artifact_key}_staging_",
+        dir=parent_dir,
     )
-    out_dir = os.path.join(
-        os.path.dirname(os.path.abspath(path)), f"{artifact_key}_analysis"
-    )
-    os.makedirs(out_dir, exist_ok=True)
-
-    results = []
-    for square in detection.squares:
-        x1, y1, x2, y2 = square.rectified_bbox
-        cell = detection.rectified[y1:y2, x1:x2]
-        if cell.size == 0:
-            raise DetectionError(
-                f"Detected crop #{square.idx} is empty. Retake the photo "
-                "with the full grid in frame."
+    try:
+        results = []
+        for square in detection.squares:
+            x1, y1, x2, y2 = square.rectified_bbox
+            cell = detection.rectified[y1:y2, x1:x2]
+            if cell.size == 0:
+                raise DetectionError(
+                    f"Detected crop #{square.idx} is empty. Retake the photo "
+                    "with the full grid in frame."
+                )
+            inverted = 255 - to_8bit(cell)
+            result = measure(inverted)
+            result.update(
+                {
+                    "idx": square.idx,
+                    "row": square.row,
+                    "col": square.col,
+                    "confidence": round(float(square.confidence), 3),
+                    "recovered": bool(square.recovered),
+                    "source_bbox": list(square.source_bbox),
+                    "crop_quad": np.rint(square.source_quad).astype(int).tolist(),
+                }
             )
-        inverted = 255 - to_8bit(cell)
-        result = measure(inverted)
-        result.update(
-            {
-                "idx": square.idx,
-                "row": square.row,
-                "col": square.col,
-                "confidence": round(float(square.confidence), 3),
-                "recovered": bool(square.recovered),
-                "crop_quad": np.rint(square.source_quad).astype(int).tolist(),
-            }
+            results.append(result)
+            crop_path = os.path.join(staging_dir, f"cell_{square.idx:02d}.png")
+            if not _write_image(crop_path, cell):
+                raise OSError(f"Could not write crop: {crop_path}")
+
+        overlay = draw_detection_overlay(img, detection)
+        overlay_name = f"{artifact_key}_grid_overlay.png"
+        overlay_path = os.path.join(staging_dir, overlay_name)
+        if not _write_image(overlay_path, overlay):
+            raise OSError(f"Could not write overlay: {overlay_path}")
+
+        heatmap = heatmap_image(results)
+        heatmap_name = f"{artifact_key}_heatmap.png"
+        heatmap_path = os.path.join(staging_dir, heatmap_name)
+        if not _write_image(heatmap_path, heatmap):
+            raise OSError(f"Could not write heatmap: {heatmap_path}")
+
+        csv_path, json_path = save_results(
+            staging_dir,
+            artifact_key,
+            original_filename,
+            results,
         )
-        results.append(result)
-        crop_path = os.path.join(out_dir, f"cell_{square.idx:02d}.png")
-        if not _write_image(crop_path, cell):
-            raise OSError(f"Could not write crop: {crop_path}")
+        backup_dir = None
+        if os.path.exists(out_dir):
+            backup_dir = f"{out_dir}.previous-{uuid.uuid4().hex}"
+            os.replace(out_dir, backup_dir)
+        try:
+            os.replace(staging_dir, out_dir)
+        except Exception:
+            if backup_dir is not None and not os.path.exists(out_dir):
+                os.replace(backup_dir, out_dir)
+            raise
+        if backup_dir is not None:
+            shutil.rmtree(backup_dir)
+    except Exception:
+        if os.path.isdir(staging_dir):
+            shutil.rmtree(staging_dir)
+        raise
 
-    overlay = draw_detection_overlay(img, detection)
-    overlay_path = os.path.join(out_dir, f"{artifact_key}_grid_overlay.png")
-    if not _write_image(overlay_path, overlay):
-        raise OSError(f"Could not write overlay: {overlay_path}")
-
-    heatmap = heatmap_image(results)
-    heatmap_path = os.path.join(out_dir, f"{artifact_key}_heatmap.png")
-    if not _write_image(heatmap_path, heatmap):
-        raise OSError(f"Could not write heatmap: {heatmap_path}")
-
-    csv_path, json_path = save_results(
-        out_dir,
-        artifact_key,
-        original_filename,
-        results,
-    )
+    overlay_path = os.path.join(out_dir, overlay_name)
+    heatmap_path = os.path.join(out_dir, heatmap_name)
+    csv_path = os.path.join(out_dir, os.path.basename(csv_path))
+    json_path = os.path.join(out_dir, os.path.basename(json_path))
     log(f"Done. {len(results)} cells analyzed. Output: {out_dir}")
 
     if show_windows:

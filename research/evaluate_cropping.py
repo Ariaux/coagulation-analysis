@@ -25,6 +25,7 @@ from grid_detector import (
     _rectify,
     detect_inner_squares,
 )
+from research.annotate_inner_squares import validate_annotations
 
 BBox = tuple[int, int, int, int]
 
@@ -40,6 +41,120 @@ class EvaluationCase:
     def __post_init__(self) -> None:
         if len(self.truth) != 9:
             raise ValueError("Evaluation cases require exactly nine truth boxes.")
+
+
+_MANIFEST_COLUMNS = ("case", "image", "annotations", "condition", "level")
+
+
+def _load_image_unicode(path: Path) -> np.ndarray:
+    try:
+        encoded = np.fromfile(str(path), dtype=np.uint8)
+    except OSError as exception:
+        raise ValueError(f"Image file does not exist or cannot be read: {path}") from exception
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Could not decode image: {path}")
+    return image
+
+
+def load_labeled_manifest(path: str | Path) -> list[EvaluationCase]:
+    """Load independently labeled real-image cases from a UTF-8 CSV manifest."""
+    manifest = Path(path)
+    if not manifest.is_file():
+        raise ValueError(f"Manifest file does not exist: {manifest}")
+    try:
+        stream = manifest.open(encoding="utf-8", newline="")
+    except OSError as exception:
+        raise ValueError(f"Could not read manifest: {manifest}") from exception
+    with stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames != list(_MANIFEST_COLUMNS):
+            raise ValueError(
+                "Manifest columns must be: case,image,annotations,condition,level."
+            )
+        rows = list(reader)
+    if not rows:
+        raise ValueError("Manifest must contain at least one labeled case.")
+
+    cases = []
+    seen = set()
+    for row_number, row in enumerate(rows, 2):
+        if None in row:
+            raise ValueError(f"Unexpected extra fields on manifest row {row_number}.")
+        case_id = row["case"]
+        if (
+            not case_id
+            or case_id != case_id.strip()
+            or re.search(r"[\x00-\x1f/\\]", case_id)
+        ):
+            raise ValueError(f"Malformed case ID on manifest row {row_number}.")
+        if case_id in seen:
+            raise ValueError(f"Duplicate case ID in manifest: {case_id}")
+        seen.add(case_id)
+        if not row["image"] or not row["annotations"]:
+            raise ValueError(f"Missing paths on manifest row {row_number}.")
+        image_relative = Path(row["image"])
+        annotations_relative = Path(row["annotations"])
+        if image_relative.is_absolute() or annotations_relative.is_absolute():
+            raise ValueError("Manifest image and annotation paths must be relative.")
+        image_path = manifest.parent / image_relative
+        annotations_path = manifest.parent / annotations_relative
+        if not image_path.is_file():
+            raise ValueError(f"Image file does not exist: {image_path}")
+        if not annotations_path.is_file():
+            raise ValueError(f"Annotation file does not exist: {annotations_path}")
+        image = _load_image_unicode(image_path)
+        if min(image.shape[:2]) < 600:
+            raise ValueError(
+                f"Manifest image must be at least 600x600 pixels: {image_path}"
+            )
+        try:
+            payload = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exception:
+            raise ValueError(f"Invalid annotation JSON: {annotations_path}") from exception
+        if not isinstance(payload, dict) or payload.get("annotator") != "manual":
+            raise ValueError("Annotations must have independent manual provenance.")
+        if payload.get("image") != image_path.name:
+            raise ValueError(
+                f"Annotation image name must exactly match {image_path.name}."
+            )
+        items = payload.get("boxes")
+        if (
+            not isinstance(items, list)
+            or len(items) != 9
+            or any(
+                not isinstance(item, dict)
+                or item.get("idx") != index
+                or not isinstance(item.get("bbox"), list)
+                or len(item["bbox"]) != 4
+                or any(
+                    not isinstance(coordinate, int)
+                    or isinstance(coordinate, bool)
+                    for coordinate in item["bbox"]
+                )
+                for index, item in enumerate(items, 1)
+            )
+        ):
+            raise ValueError("Annotations must contain nine unique row-major boxes.")
+        boxes = tuple(tuple(item["bbox"]) for item in items)
+        validated = validate_annotations(image_path.name, boxes)
+        truth = tuple(tuple(item["bbox"]) for item in validated["boxes"])
+        height, width = image.shape[:2]
+        if any(
+            x1 < 0 or y1 < 0 or x2 > width or y2 > height
+            for x1, y1, x2, y2 in truth
+        ):
+            raise ValueError("Annotation boxes must lie within the image.")
+        cases.append(
+            EvaluationCase(
+                case_id,
+                image,
+                truth,
+                row["condition"] or "unspecified",
+                row["level"] or "reference",
+            )
+        )
+    return cases
 
 
 def box_iou(left: BBox, right: BBox) -> float:
@@ -642,15 +757,22 @@ def make_synthetic_fixture(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--synthetic", action="store_true", help="run the synthetic matrix")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--synthetic", action="store_true", help="run the synthetic matrix"
+    )
+    source.add_argument(
+        "--manifest", type=Path, help="UTF-8 CSV of independently labeled images"
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ablations", action="store_true")
     arguments = parser.parse_args(argv)
-    if not arguments.synthetic:
-        parser.error("Select --synthetic; real data require an explicit labeled manifest.")
-    image, truth = make_synthetic_fixture()
-    cases = [EvaluationCase("synthetic-reference", image, truth)]
-    cases.extend(make_perturbations(image, truth))
+    if arguments.synthetic:
+        image, truth = make_synthetic_fixture()
+        cases = [EvaluationCase("synthetic-reference", image, truth)]
+        cases.extend(make_perturbations(image, truth))
+    else:
+        cases = load_labeled_manifest(arguments.manifest)
     rows = evaluate_methods(cases, arguments.output, arguments.ablations)
     print(f"Evaluated {len(cases)} cases and wrote {len(rows)} method rows.")
     for name in (

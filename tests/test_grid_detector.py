@@ -3,7 +3,13 @@ import unittest
 import cv2
 import numpy as np
 
-from grid_detector import DetectionError, DetectorOptions, detect_inner_squares
+from grid_detector import (
+    DetectionError,
+    DetectorOptions,
+    _Candidate,
+    _map_squares,
+    detect_inner_squares,
+)
 
 
 def make_fixture(
@@ -223,7 +229,43 @@ def make_disconnected_edge_marks_fixture(size=900, brightness=210):
     return image
 
 
+def weaken_inner_edges(edge_count, size=900, brightness=210):
+    image, expected = make_fixture(size=size, brightness=brightness)
+    margin = int(round(size * 0.04))
+    cell = (size - 2 * margin) // 3
+    line = max(8, size // 90)
+    inset = int(round(cell * 0.22))
+    for index in range(edge_count):
+        row, col = divmod(index, 3)
+        left = margin + col * cell + inset
+        top = margin + row * cell + inset
+        bottom = margin + (row + 1) * cell - inset
+        cv2.line(
+            image,
+            (left, top + line * 2),
+            (left, bottom - line * 2),
+            (brightness, brightness, brightness),
+            line * 3,
+        )
+    return image, expected
+
+
 class GridDetectorTests(unittest.TestCase):
+    def test_identity_mapping_preserves_half_open_source_boundary(self):
+        candidate = _Candidate(
+            (0, 0, 100, 100),
+            (1.0, 1.0, 1.0, 1.0),
+            confidence=1.0,
+        )
+
+        square = _map_squares(
+            [candidate], np.eye(3), (100, 100, 3)
+        )[0]
+
+        self.assertEqual((0, 0, 100, 100), square.source_bbox)
+        self.assertTrue(np.all(square.source_quad >= 0))
+        self.assertTrue(np.all(square.source_quad <= 99))
+
     def test_detects_nine_squares_in_row_major_order(self):
         image, expected = make_fixture()
 
@@ -409,6 +451,49 @@ class GridDetectorTests(unittest.TestCase):
 
     def test_rejects_disconnected_marks_along_every_inner_edge(self):
         image = make_disconnected_edge_marks_fixture()
+
+        with self.assertRaises(DetectionError):
+            detect_inner_squares(image)
+
+    def test_recovers_exactly_one_globally_unique_weak_inner_edge(self):
+        image, _ = weaken_inner_edges(1)
+
+        detection = detect_inner_squares(image)
+
+        recovered = [square for square in detection.squares if square.recovered]
+        self.assertEqual(1, len(recovered))
+        square = recovered[0]
+        peer_lefts = [
+            candidate.rectified_bbox[0]
+            for candidate in detection.squares
+            if candidate.col == square.col and candidate.idx != square.idx
+        ]
+        self.assertLessEqual(
+            abs(square.rectified_bbox[0] - int(round(np.median(peer_lefts)))),
+            2,
+        )
+        self.assertGreaterEqual(square.confidence, 0.55)
+        self.assertLessEqual(square.confidence, 0.70)
+        self.assertLess(
+            square.confidence,
+            min(
+                candidate.confidence
+                for candidate in detection.squares
+                if candidate.col == square.col and candidate.idx != square.idx
+            ),
+        )
+
+    def test_no_grid_validation_disables_weak_edge_recovery(self):
+        image, _ = weaken_inner_edges(1)
+
+        with self.assertRaises(DetectionError):
+            detect_inner_squares(
+                image,
+                DetectorOptions(validate_grid=False),
+            )
+
+    def test_rejects_multiple_weak_inner_edges(self):
+        image, _ = weaken_inner_edges(2)
 
         with self.assertRaises(DetectionError):
             detect_inner_squares(image)

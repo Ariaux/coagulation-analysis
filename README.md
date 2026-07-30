@@ -86,17 +86,24 @@ Drag the photo onto `CoagulationAnalysis.exe`. The app always detects a fixed
 row-major order (left to right, then top to bottom), retains empty positions,
 and crops only the innermost square inside each cell's dark frame.
 
-The output is created beside the input photo. Its name includes the input
-extension so files with the same stem remain separate: `sample.png` produces
-`sample_png_analysis`, while `sample.jpg` produces `sample_jpg_analysis`.
+The output is created beside the input photo. Its readable folder name includes
+the input stem and extension plus a short stable filename hash, so distinct
+original filenames cannot overwrite one another. Reprocessing the same exact
+filename deterministically replaces only that input's own artifacts.
 Each output folder contains:
 
 - `cell_01.png` through `cell_09.png`, including empty positions;
 - `*_grid_overlay.png`, showing detected inner-square coordinates and numbers;
 - `*_heatmap.png`, showing the 3×3 measurement heatmap;
-- `*_results.csv`, with measurements and per-cell confidence;
-- `*_results.json`, with measurements, confidence, recovery status, and source
-  crop coordinates.
+- `*_results.csv`, with measurements, confidence, recovery status, a half-open
+  source bounding box, and eight scalar source-quadrilateral coordinates;
+- `*_results.json`, with the same measurements and geometry.
+
+Recovery is deliberately narrow: the detector may reconstruct one globally
+unique weak inner edge from the matching boundaries in the other two row or
+column cells. Structural-divider failures, multiple weak edges, incomplete
+fixtures, and unreliable geometry stop with an actionable error before any
+final output folder or partial result set is created.
 
 The packaged app runs entirely offline and does not require Python or an
 internet connection.
@@ -115,8 +122,8 @@ internet connection.
   folder. Do not move only `CoagulationAnalysis.exe` or delete its companion
   files.
 - **Chinese paths:** Chinese and other Unicode file/folder names are supported.
-- **Same filename with different extensions:** outputs are isolated by
-  extension, such as `sample_png_analysis` and `sample_jpg_analysis`.
+- **Similar filenames:** outputs are isolated by a stable hash of the exact
+  original filename, including its extension.
 
 ## Classical CV Pipeline (Variable-Grid CLI, no GPU needed)
 
@@ -401,6 +408,23 @@ Create independent manual annotations for a real image with:
 ```bash
 python -m research.annotate_inner_squares path/to/image.png \
   --output path/to/image.annotations.json
+```
+
+Create a UTF-8 manifest with the exact columns
+`case,image,annotations,condition,level`. Image and annotation paths are
+relative to the manifest:
+
+```csv
+case,image,annotations,condition,level
+photo-001,images/photo-001.png,labels/photo-001.json,lighting,normal
+```
+
+Then run the labeled evaluation:
+
+```bash
+python -m research.evaluate_cropping \
+  --manifest path/to/manifest.csv \
+  --output research/results/manual-new
 ```
 
 Real-image results must come from reviewed manual annotations. The repository

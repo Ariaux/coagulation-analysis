@@ -14,6 +14,40 @@ from tests.test_grid_detector import make_fixture
 
 
 class StandalonePipelineTests(unittest.TestCase):
+    def test_write_failure_does_not_publish_partial_output(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "write-failure.png")
+            self.assertTrue(cv2.imwrite(image_path, image))
+            real_write = app_standalone._write_image
+            calls = 0
+
+            def fail_third(path, content):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    return False
+                return real_write(path, content)
+
+            with mock.patch.object(
+                app_standalone, "_write_image", side_effect=fail_third
+            ):
+                with self.assertRaises(OSError):
+                    process_image(
+                        image_path,
+                        show_windows=False,
+                        open_folder=False,
+                    )
+
+            final_dir = os.path.join(
+                temp_dir,
+                app_standalone._artifact_key("write-failure.png") + "_analysis",
+            )
+            self.assertFalse(os.path.exists(final_dir))
+            self.assertFalse(
+                any(name.startswith(".write-failure") for name in os.listdir(temp_dir))
+            )
+
     def test_process_image_crops_detected_inner_squares_and_saves_outputs(self):
         image, _ = make_fixture(filled=(1, 5, 9))
 
@@ -61,11 +95,12 @@ class StandalonePipelineTests(unittest.TestCase):
             self.assertEqual(9, len(payload["cells"]))
             self.assertIn("crop_quad", payload["cells"][0])
             self.assertEqual(4, len(payload["cells"][0]["crop_quad"]))
+            self.assertIn("source_bbox", payload["cells"][0])
 
             with open(
                 outputs["csv_path"], newline="", encoding="utf-8"
             ) as results_file:
-                header = next(csv.reader(results_file))
+                rows = list(csv.DictReader(results_file))
             self.assertEqual(
                 [
                     "cell",
@@ -80,8 +115,41 @@ class StandalonePipelineTests(unittest.TestCase):
                     "area_px",
                     "confidence",
                     "recovered",
+                    "source_bbox_x1",
+                    "source_bbox_y1",
+                    "source_bbox_x2",
+                    "source_bbox_y2",
+                    "quad_1_x",
+                    "quad_1_y",
+                    "quad_2_x",
+                    "quad_2_y",
+                    "quad_3_x",
+                    "quad_3_y",
+                    "quad_4_x",
+                    "quad_4_y",
                 ],
-                header,
+                list(rows[0]),
+            )
+            first_json = payload["cells"][0]
+            first_csv = rows[0]
+            self.assertEqual(
+                first_json["source_bbox"],
+                [
+                    int(first_csv["source_bbox_x1"]),
+                    int(first_csv["source_bbox_y1"]),
+                    int(first_csv["source_bbox_x2"]),
+                    int(first_csv["source_bbox_y2"]),
+                ],
+            )
+            self.assertEqual(
+                first_json["crop_quad"],
+                [
+                    [
+                        int(first_csv[f"quad_{point}_x"]),
+                        int(first_csv[f"quad_{point}_y"]),
+                    ]
+                    for point in range(1, 5)
+                ],
             )
 
     def test_pipeline_rejects_images_with_either_dimension_below_600(self):
@@ -174,6 +242,34 @@ class StandalonePipelineTests(unittest.TestCase):
                 self.assertEqual("run.png", json.load(result_file)["image"])
             with open(jpg_outputs["json_path"], encoding="utf-8") as result_file:
                 self.assertEqual("run.jpg", json.load(result_file)["image"])
+
+    def test_extensionless_name_cannot_collide_with_extension_key(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jpg_path = os.path.join(temp_dir, "sample.jpg")
+            extensionless_path = os.path.join(temp_dir, "sample_jpg")
+            self.assertTrue(cv2.imwrite(jpg_path, image))
+            success, encoded = cv2.imencode(".png", image)
+            self.assertTrue(success)
+            encoded.tofile(extensionless_path)
+
+            jpg_outputs = process_image(
+                jpg_path, show_windows=False, open_folder=False
+            )
+            extensionless_outputs = process_image(
+                extensionless_path, show_windows=False, open_folder=False
+            )
+
+            self.assertNotEqual(
+                jpg_outputs["output_dir"], extensionless_outputs["output_dir"]
+            )
+            for outputs, filename in (
+                (jpg_outputs, "sample.jpg"),
+                (extensionless_outputs, "sample_jpg"),
+            ):
+                self.assertTrue(os.path.isfile(outputs["json_path"]))
+                with open(outputs["json_path"], encoding="utf-8") as result_file:
+                    self.assertEqual(filename, json.load(result_file)["image"])
 
     def test_unicode_paths_use_encoded_image_writes(self):
         image, _ = make_fixture(filled=(1, 5, 9))

@@ -572,21 +572,60 @@ def _validate_grid(
         raise DetectionError(
             "No inner frames were found. Make sure the complete fixture is visible."
         )
-    if any(
-        min(candidate.edge_strengths) < _MIN_EDGE_CONTRAST
-        or min(candidate.edge_coverages) < _MIN_EDGE_COVERAGE
-        or min(candidate.edge_runs) < _MIN_EDGE_RUN
-        for candidate in raw
-        if not candidate.recovered
-    ):
+    weak_edges = [
+        (candidate_index, edge_index)
+        for candidate_index, candidate in enumerate(raw)
+        for edge_index, metrics in enumerate(
+            zip(
+                candidate.edge_strengths,
+                candidate.edge_coverages,
+                candidate.edge_runs,
+            )
+        )
+        if (
+            metrics[0] < _MIN_EDGE_CONTRAST
+            or metrics[1] < _MIN_EDGE_COVERAGE
+            or metrics[2] < _MIN_EDGE_RUN
+        )
+    ]
+    if not enabled:
+        if weak_edges:
+            raise DetectionError(
+                "One or more inner frames are incomplete or unclear. "
+                "Use even lighting and keep every dark edge visible."
+            )
+        for candidate in raw:
+            candidate.confidence = min(1.0, max(0.0, candidate.edge_strength))
+        return raw
+    if len(weak_edges) == 1 and len(raw) == 9:
+        candidate_index, edge_index = weak_edges[0]
+        candidate = raw[candidate_index]
+        row, col = divmod(candidate_index, 3)
+        peers = (
+            [raw[peer_row * 3 + col] for peer_row in range(3) if peer_row != row]
+            if edge_index < 2
+            else [raw[row * 3 + peer_col] for peer_col in range(3) if peer_col != col]
+        )
+        bbox = list(candidate.bbox)
+        bbox[edge_index] = int(
+            round(float(np.median([peer.bbox[edge_index] for peer in peers])))
+        )
+        strengths = list(candidate.edge_strengths)
+        coverages = list(candidate.edge_coverages)
+        runs = list(candidate.edge_runs)
+        strengths[edge_index] = _MIN_EDGE_CONTRAST
+        coverages[edge_index] = _MIN_EDGE_COVERAGE
+        runs[edge_index] = _MIN_EDGE_RUN
+        candidate.bbox = tuple(bbox)
+        candidate.edge_strengths = tuple(strengths)
+        candidate.edge_coverages = tuple(coverages)
+        candidate.edge_runs = tuple(runs)
+        candidate.recovered = True
+    elif weak_edges:
         raise DetectionError(
             "One or more inner frames are incomplete or unclear. "
             "Use even lighting and keep every dark edge visible."
         )
-    if not enabled:
-        for candidate in raw:
-            candidate.confidence = min(1.0, max(0.0, candidate.edge_strength))
-        return raw
     if len(raw) != 9:
         raise DetectionError(
             f"Expected nine inner frames but found {len(raw)}. "
@@ -655,6 +694,8 @@ def _validate_grid(
                 1.0,
             )
         )
+        if candidate.recovered:
+            candidate.confidence = min(candidate.confidence, 0.70)
 
     if min(candidate.confidence for candidate in raw) < 0.55:
         raise DetectionError(
@@ -677,15 +718,24 @@ def _map_squares(
             [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]],
             dtype=np.float32,
         )
-        source_quad = cv2.perspectiveTransform(
+        mapped_quad = cv2.perspectiveTransform(
             rectified_corners, inverse
         )[0].astype(np.float32)
+        left = int(
+            np.clip(np.floor(mapped_quad[:, 0].min()), 0, source_width - 1)
+        )
+        top = int(
+            np.clip(np.floor(mapped_quad[:, 1].min()), 0, source_height - 1)
+        )
+        right = int(
+            np.clip(np.ceil(mapped_quad[:, 0].max()), 1, source_width)
+        )
+        bottom = int(
+            np.clip(np.ceil(mapped_quad[:, 1].max()), 1, source_height)
+        )
+        source_quad = mapped_quad.copy()
         source_quad[:, 0] = np.clip(source_quad[:, 0], 0, source_width - 1)
         source_quad[:, 1] = np.clip(source_quad[:, 1], 0, source_height - 1)
-        left = int(np.floor(source_quad[:, 0].min()))
-        top = int(np.floor(source_quad[:, 1].min()))
-        right = int(np.ceil(source_quad[:, 0].max()))
-        bottom = int(np.ceil(source_quad[:, 1].max()))
         row, col = divmod(position, 3)
         squares.append(
             InnerSquare(
