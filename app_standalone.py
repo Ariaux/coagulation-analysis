@@ -79,6 +79,18 @@ def load_image(path):
     return img
 
 
+def _write_image(path, image):
+    extension = os.path.splitext(path)[1]
+    success, encoded = cv2.imencode(extension, image)
+    if not success:
+        return False
+    try:
+        encoded.tofile(path)
+    except OSError:
+        return False
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
 def draw_detection_overlay(img, detection: GridDetection):
     overlay = img.copy()
     for square in detection.squares:
@@ -98,9 +110,9 @@ def draw_detection_overlay(img, detection: GridDetection):
     return overlay
 
 
-def save_results(out_dir, base_name, results):
-    csv_path = os.path.join(out_dir, f"{base_name}_results.csv")
-    json_path = os.path.join(out_dir, f"{base_name}_results.json")
+def save_results(out_dir, artifact_key, original_filename, results):
+    csv_path = os.path.join(out_dir, f"{artifact_key}_results.csv")
+    json_path = os.path.join(out_dir, f"{artifact_key}_results.json")
     csv_header = [
         "cell",
         "row",
@@ -138,7 +150,7 @@ def save_results(out_dir, base_name, results):
 
     with open(json_path, "w", encoding="utf-8") as json_file:
         json.dump(
-            {"image": base_name, "grid": "3x3", "cells": results},
+            {"image": original_filename, "grid": "3x3", "cells": results},
             json_file,
             indent=2,
         )
@@ -186,9 +198,14 @@ def process_image(path, show_windows=True, open_folder=True):
         )
 
     detection = detect_inner_squares(img)
-    base_name = os.path.splitext(os.path.basename(path))[0]
+    original_filename = os.path.basename(path)
+    base_name, extension = os.path.splitext(original_filename)
+    extension_key = extension.lstrip(".").lower()
+    artifact_key = (
+        f"{base_name}_{extension_key}" if extension_key else base_name
+    )
     out_dir = os.path.join(
-        os.path.dirname(os.path.abspath(path)), f"{base_name}_analysis"
+        os.path.dirname(os.path.abspath(path)), f"{artifact_key}_analysis"
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -215,24 +232,29 @@ def process_image(path, show_windows=True, open_folder=True):
         )
         results.append(result)
         crop_path = os.path.join(out_dir, f"cell_{square.idx:02d}.png")
-        if not cv2.imwrite(crop_path, cell):
+        if not _write_image(crop_path, cell):
             raise OSError(f"Could not write crop: {crop_path}")
 
     overlay = draw_detection_overlay(img, detection)
-    overlay_path = os.path.join(out_dir, f"{base_name}_grid_overlay.png")
-    if not cv2.imwrite(overlay_path, overlay):
+    overlay_path = os.path.join(out_dir, f"{artifact_key}_grid_overlay.png")
+    if not _write_image(overlay_path, overlay):
         raise OSError(f"Could not write overlay: {overlay_path}")
 
     heatmap = heatmap_image(results)
-    heatmap_path = os.path.join(out_dir, f"{base_name}_heatmap.png")
-    if not cv2.imwrite(heatmap_path, heatmap):
+    heatmap_path = os.path.join(out_dir, f"{artifact_key}_heatmap.png")
+    if not _write_image(heatmap_path, heatmap):
         raise OSError(f"Could not write heatmap: {heatmap_path}")
 
-    csv_path, json_path = save_results(out_dir, base_name, results)
+    csv_path, json_path = save_results(
+        out_dir,
+        artifact_key,
+        original_filename,
+        results,
+    )
     log(f"Done. {len(results)} cells analyzed. Output: {out_dir}")
 
     if show_windows:
-        show_results(overlay, heatmap, base_name)
+        show_results(overlay, heatmap, original_filename)
     if open_folder:
         open_output_folder(out_dir)
 

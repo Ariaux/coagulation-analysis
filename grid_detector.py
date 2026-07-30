@@ -527,10 +527,13 @@ def _refine_template_squares(
                     bottom_width,
                 )
                 if min(cell_x, cell_y) < 100.0:
-                    x0 = int(round(predicted_left + 2))
-                    x1 = int(round(predicted_right - 2))
-                    y0 = int(round(predicted_top + 2))
-                    y1 = int(round(predicted_bottom - 2))
+                    template_inset = (
+                        int(round(min(cell_x, cell_y) * 0.10)) + 2
+                    )
+                    x0 = int(round(predicted_left + template_inset))
+                    x1 = int(round(predicted_right - template_inset))
+                    y0 = int(round(predicted_top + template_inset))
+                    y1 = int(round(predicted_bottom - template_inset))
                 else:
                     x0 = int(round(left + left_width / 2.0 + 2))
                     x1 = int(round(right - right_width / 2.0 - 2))
