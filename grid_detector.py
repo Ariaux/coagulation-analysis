@@ -103,6 +103,29 @@ def _find_outer_quad(image: np.ndarray) -> np.ndarray:
         if 0.15 <= cv2.contourArea(contour) / image_area <= 0.95
     ]
     if not candidates:
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            area_ratio = cv2.contourArea(largest) / image_area
+            x, y, width, height = cv2.boundingRect(largest)
+            image_height, image_width = image.shape[:2]
+            touches_all_edges = (
+                x == 0
+                and y == 0
+                and x + width >= image_width
+                and y + height >= image_height
+            )
+            if area_ratio > 0.95 and touches_all_edges:
+                return _order_quad(
+                    np.array(
+                        [
+                            [0, 0],
+                            [image_width - 1, 0],
+                            [image_width - 1, image_height - 1],
+                            [0, image_height - 1],
+                        ],
+                        dtype=np.float32,
+                    )
+                )
         raise DetectionError(_INCOMPLETE_FIXTURE_MESSAGE)
 
     contour = max(candidates, key=cv2.contourArea)

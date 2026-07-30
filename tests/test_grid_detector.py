@@ -247,6 +247,27 @@ class GridDetectorTests(unittest.TestCase):
             self.assertLessEqual(coordinate_error, 12)
             self.assertGreaterEqual(square.confidence, 0.55)
 
+    def test_detects_complete_fixture_touching_all_image_edges(self):
+        image, _ = make_fixture()
+        margin = int(round(image.shape[0] * 0.04))
+        cell = (image.shape[0] - 2 * margin) // 3
+        line = max(8, image.shape[0] // 90)
+        fixture_end = margin + 3 * cell
+        edge_start = margin - line // 2
+        edge_end = fixture_end + line // 2 + 1
+        edge_to_edge = image[
+            edge_start:edge_end,
+            edge_start:edge_end,
+        ]
+
+        detection = detect_inner_squares(edge_to_edge)
+
+        self.assertEqual(9, len(detection.squares))
+        self.assertGreaterEqual(
+            min(square.confidence for square in detection.squares),
+            0.55,
+        )
+
     def test_detects_filled_cells_after_small_rotation(self):
         image, _ = make_fixture(angle=-5.0, brightness=150, filled=(1, 5, 9))
 
