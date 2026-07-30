@@ -173,6 +173,56 @@ def make_corner_only_fixture(size=900, brightness=210):
     return image
 
 
+def make_disconnected_edge_marks_fixture(size=900, brightness=210):
+    image = np.full((size, size, 3), brightness, dtype=np.uint8)
+    margin = int(round(size * 0.04))
+    cell = (size - 2 * margin) // 3
+    line = max(8, size // 90)
+    dark = (25, 25, 25)
+    fixture_end = margin + 3 * cell
+    cv2.rectangle(
+        image,
+        (margin, margin),
+        (fixture_end, fixture_end),
+        dark,
+        line,
+    )
+    for row in range(3):
+        for col in range(3):
+            x0 = margin + col * cell
+            y0 = margin + row * cell
+            x1 = x0 + cell
+            y1 = y0 + cell
+            cv2.rectangle(image, (x0, y0), (x1, y1), dark, line)
+
+            inset = int(round(cell * 0.22))
+            left = x0 + inset
+            top = y0 + inset
+            right = x0 + cell - inset
+            bottom = y0 + cell - inset
+            middle_x = (left + right) // 2
+            middle_y = (top + bottom) // 2
+            dot_radius = 6
+            for x, y in (
+                (left, top),
+                (middle_x, top),
+                (right, top),
+                (left, middle_y),
+                (right, middle_y),
+                (left, bottom),
+                (middle_x, bottom),
+                (right, bottom),
+            ):
+                cv2.rectangle(
+                    image,
+                    (x - dot_radius, y - dot_radius),
+                    (x + dot_radius, y + dot_radius),
+                    dark,
+                    -1,
+                )
+    return image
+
+
 class GridDetectorTests(unittest.TestCase):
     def test_detects_nine_squares_in_row_major_order(self):
         image, expected = make_fixture()
@@ -291,6 +341,12 @@ class GridDetectorTests(unittest.TestCase):
 
     def test_rejects_corner_marks_without_continuous_inner_frames(self):
         image = make_corner_only_fixture()
+
+        with self.assertRaises(DetectionError):
+            detect_inner_squares(image)
+
+    def test_rejects_disconnected_marks_along_every_inner_edge(self):
+        image = make_disconnected_edge_marks_fixture()
 
         with self.assertRaises(DetectionError):
             detect_inner_squares(image)

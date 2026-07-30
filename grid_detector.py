@@ -45,6 +45,8 @@ class DetectorOptions:
 class _Candidate:
     bbox: tuple[int, int, int, int]
     edge_strengths: tuple[float, float, float, float]
+    edge_coverages: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    edge_runs: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     confidence: float = 0.0
     recovered: bool = False
 
@@ -54,6 +56,8 @@ class _Candidate:
 
 
 _MIN_EDGE_CONTRAST = 0.10
+_MIN_EDGE_COVERAGE = 0.55
+_MIN_EDGE_RUN = 0.45
 _INCOMPLETE_FIXTURE_MESSAGE = (
     "Could not detect a complete 3x3 fixture. Keep the full grid in frame "
     "and photograph it straight on."
@@ -238,6 +242,45 @@ def _ridge(
     return center, thickness, strength
 
 
+def _edge_continuity(
+    dark_mask: np.ndarray,
+    center: float,
+    axis: int,
+    span_start: int,
+    span_end: int,
+    thickness: float,
+) -> tuple[float, float]:
+    perpendicular_limit = dark_mask.shape[1] if axis == 0 else dark_mask.shape[0]
+    middle = int(round(center))
+    half_band = max(1, min(3, int(round(thickness * 0.25))))
+    band_start = max(0, middle - half_band)
+    band_end = min(perpendicular_limit, middle + half_band + 1)
+    if axis == 0:
+        signal = np.any(
+            dark_mask[span_start:span_end, band_start:band_end], axis=1
+        )
+    else:
+        signal = np.any(
+            dark_mask[band_start:band_end, span_start:span_end], axis=0
+        )
+    if signal.size == 0:
+        return 0.0, 0.0
+
+    coverage = float(np.mean(signal))
+    closed = signal.copy()
+    dark_indices = np.flatnonzero(signal)
+    gap_tolerance = max(2, int(round(signal.size * 0.025)))
+    for previous, following in zip(dark_indices[:-1], dark_indices[1:]):
+        if following - previous - 1 <= gap_tolerance:
+            closed[previous : following + 1] = True
+
+    transitions = np.diff(np.pad(closed.astype(np.int8), (1, 1)))
+    starts = np.flatnonzero(transitions == 1)
+    ends = np.flatnonzero(transitions == -1)
+    longest_run = int(np.max(ends - starts)) if starts.size else 0
+    return coverage, longest_run / float(signal.size)
+
+
 def _validate_fixture_structure(rectified: np.ndarray) -> None:
     gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(
@@ -341,6 +384,42 @@ def _refine_template_squares(
                     1,
                     horizontal_pieces,
                 )
+                vertical_span_start = max(0, int((row + 0.20) * cell_y))
+                vertical_span_end = min(height, int((row + 0.80) * cell_y))
+                horizontal_span_start = max(0, int((col + 0.20) * cell_x))
+                horizontal_span_end = min(width, int((col + 0.80) * cell_x))
+                left_coverage, left_run = _edge_continuity(
+                    dark_mask,
+                    left,
+                    0,
+                    vertical_span_start,
+                    vertical_span_end,
+                    left_width,
+                )
+                right_coverage, right_run = _edge_continuity(
+                    dark_mask,
+                    right,
+                    0,
+                    vertical_span_start,
+                    vertical_span_end,
+                    right_width,
+                )
+                top_coverage, top_run = _edge_continuity(
+                    dark_mask,
+                    top,
+                    1,
+                    horizontal_span_start,
+                    horizontal_span_end,
+                    top_width,
+                )
+                bottom_coverage, bottom_run = _edge_continuity(
+                    dark_mask,
+                    bottom,
+                    1,
+                    horizontal_span_start,
+                    horizontal_span_end,
+                    bottom_width,
+                )
                 x0 = int(round(left + left_width / 2.0 + 2))
                 x1 = int(round(right - right_width / 2.0 - 2))
                 y0 = int(round(top + top_width / 2.0 + 2))
@@ -351,16 +430,32 @@ def _refine_template_squares(
                     top_strength,
                     bottom_strength,
                 )
+                edge_coverages = (
+                    left_coverage,
+                    right_coverage,
+                    top_coverage,
+                    bottom_coverage,
+                )
+                edge_runs = (left_run, right_run, top_run, bottom_run)
             else:
                 x0 = int(round(predicted_left + 2))
                 x1 = int(round(predicted_right - 2))
                 y0 = int(round(predicted_top + 2))
                 y1 = int(round(predicted_bottom - 2))
                 edge_strengths = (0.7, 0.7, 0.7, 0.7)
+                edge_coverages = (1.0, 1.0, 1.0, 1.0)
+                edge_runs = (1.0, 1.0, 1.0, 1.0)
 
             if x1 <= x0 or y1 <= y0:
                 continue
-            candidates.append(_Candidate((x0, y0, x1, y1), edge_strengths))
+            candidates.append(
+                _Candidate(
+                    (x0, y0, x1, y1),
+                    edge_strengths,
+                    edge_coverages,
+                    edge_runs,
+                )
+            )
     return candidates
 
 
@@ -373,6 +468,8 @@ def _validate_grid(
         )
     if any(
         min(candidate.edge_strengths) < _MIN_EDGE_CONTRAST
+        or min(candidate.edge_coverages) < _MIN_EDGE_COVERAGE
+        or min(candidate.edge_runs) < _MIN_EDGE_RUN
         for candidate in raw
         if not candidate.recovered
     ):
