@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -115,56 +116,179 @@ class ResearchEvaluationTests(unittest.TestCase):
 
         self.assertEqual(cv2.boundingRect(larger), selected)
 
-    def test_runtime_times_detector_only(self):
+    def test_plot_iou_values_include_failed_rows_as_zero(self):
+        rows = [
+            {
+                "method": "hybrid",
+                "condition": "noise",
+                "mean_iou": 1.0,
+                "failed": False,
+            },
+            {
+                "method": "hybrid",
+                "condition": "noise",
+                "mean_iou": 0.0,
+                "failed": True,
+            },
+        ]
+
+        values = evaluation._plot_iou_values(rows, "hybrid", "noise")
+
+        self.assertEqual([1.0, 0.0], values)
+        self.assertEqual(0.5, float(np.mean(values)))
+
+    def test_failure_overlays_cannot_escape_output_directory(self):
+        image, truth = make_fixture()
+        image[:] = 255
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "results"
+
+            evaluate_methods(
+                [("../../escaped", image, tuple(truth))],
+                output,
+            )
+
+            self.assertFalse(any(root.glob("escaped*.png")))
+            failures = output / "failures"
+            overlays = list(failures.glob("*.png"))
+            self.assertEqual(3, len(overlays))
+            for overlay in overlays:
+                overlay.resolve().relative_to(failures.resolve())
+                self.assertTrue(overlay.name.startswith("000_"))
+                self.assertNotIn("..", overlay.name)
+
+    def test_nonempty_output_directory_is_rejected_without_deleting_files(self):
+        image, truth = make_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results"
+            stale = output / "failures" / "old.png"
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b"old-result")
+
+            with self.assertRaisesRegex(ValueError, "empty"):
+                evaluate_methods(
+                    [("synthetic-001", image, tuple(truth))],
+                    output,
+                )
+
+            self.assertEqual(b"old-result", stale.read_bytes())
+            self.assertEqual([stale], [path for path in output.rglob("*") if path.is_file()])
+
+    def test_runtime_is_repeated_detector_only_and_order_is_rotated(self):
         image, truth = make_fixture()
         events = []
-        clock_values = iter((10.0, 11.0, 20.0, 21.0, 30.0, 31.0))
+        durations = iter([0.003, 0.001, 0.002] * 9)
+        timeline = 10.0
+        pending_duration = None
 
         def clock():
-            events.append("clock")
-            return next(clock_values)
+            nonlocal timeline, pending_duration
+            if pending_duration is None:
+                pending_duration = next(durations)
+                events.append(("clock_start",))
+                return timeline
+            timeline += pending_duration
+            pending_duration = None
+            events.append(("clock_end",))
+            result = timeline
+            timeline += 0.01
+            return result
 
-        def detector(_image):
-            events.append("detector")
-            if events.count("detector") == 2:
-                raise evaluation.DetectionError("controlled failure")
-            return tuple(truth)
+        def make_detector(method):
+            def detector(case_image):
+                case_index = int(case_image[0, 0, 0])
+                events.append(("detector", case_index, method))
+                return tuple(truth)
+
+            return detector
 
         original_mean = evaluation._mean_inverted
 
         def measured_mean(*args):
-            events.append("metric")
+            events.append(("metric",))
             return original_mean(*args)
+
+        cases = []
+        for case_index in range(3):
+            case_image = image.copy()
+            case_image[0, 0] = case_index
+            cases.append((f"case-{case_index}", case_image, tuple(truth)))
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.multiple(
             evaluation,
-            fixed_ratio_detector=detector,
-            contour_only_detector=detector,
-            hybrid_detector=detector,
+            fixed_ratio_detector=make_detector("fixed_ratio"),
+            contour_only_detector=make_detector("contour_only"),
+            hybrid_detector=make_detector("hybrid"),
             _mean_inverted=measured_mean,
+        ):
+            rows = evaluate_methods(
+                cases,
+                directory,
+                clock=clock,
+            )
+
+        calls = Counter(
+            event[2] for event in events if event[0] == "detector"
+        )
+        self.assertEqual(
+            {"fixed_ratio": 12, "contour_only": 12, "hybrid": 12},
+            dict(calls),
+        )
+        for row in rows:
+            np.testing.assert_allclose([3.0, 1.0, 2.0], row["runtime_samples_ms"])
+            self.assertAlmostEqual(2.0, row["runtime_ms"])
+        for index, event in enumerate(events):
+            if event[0] == "clock_start":
+                self.assertEqual("detector", events[index + 1][0])
+                self.assertEqual("clock_end", events[index + 2][0])
+
+        first_methods = {}
+        for event in events:
+            if event[0] == "detector":
+                first_methods.setdefault(event[1], [])
+                if event[2] not in first_methods[event[1]]:
+                    first_methods[event[1]].append(event[2])
+        self.assertEqual(
+            {
+                0: ["fixed_ratio", "contour_only", "hybrid"],
+                1: ["contour_only", "hybrid", "fixed_ratio"],
+                2: ["hybrid", "fixed_ratio", "contour_only"],
+            },
+            first_methods,
+        )
+
+    def test_inconsistent_detector_repetitions_are_recorded_as_failure(self):
+        image, truth = make_fixture()
+        call_count = 0
+
+        def changing_detector(_image):
+            nonlocal call_count
+            call_count += 1
+            method_call = (call_count - 1) % 4
+            if method_call == 1:
+                shifted = list(truth)
+                x1, y1, x2, y2 = shifted[0]
+                shifted[0] = (x1 + 1, y1, x2 + 1, y2)
+                return tuple(shifted)
+            return tuple(truth)
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.multiple(
+            evaluation,
+            fixed_ratio_detector=changing_detector,
+            contour_only_detector=changing_detector,
+            hybrid_detector=changing_detector,
         ):
             rows = evaluate_methods(
                 [("synthetic-001", image, tuple(truth))],
                 directory,
-                clock=clock,
-            )
-            summary = json.loads(
-                (Path(directory) / "summary.json").read_text("utf-8")
             )
 
-        first_detector = events.index("detector")
-        self.assertEqual("clock", events[first_detector - 1])
-        self.assertEqual("clock", events[first_detector + 1])
-        self.assertEqual([1000.0, 1000.0, 1000.0], [row["runtime_ms"] for row in rows])
-        self.assertTrue(rows[1]["failed"])
-        failed_summary = summary["by_method"]["contour_only"]
-        self.assertEqual(0.0, failed_summary["mean_iou"])
-        self.assertEqual(
-            {"total": 1, "detected": 0, "failed": 1},
-            failed_summary["counts"],
+        self.assertEqual(3, len(rows))
+        self.assertTrue(all(row["failed"] for row in rows))
+        self.assertTrue(
+            all("non-deterministic" in row["error"].lower() for row in rows)
         )
-        self.assertIsNone(failed_summary["mean_boundary_error"])
-        self.assertIsNone(failed_summary["measurement_mae"])
 
 
 class AnnotationValidationTests(unittest.TestCase):

@@ -71,7 +71,8 @@ For an `xyxy` box \(A\) and reference box \(T\):
 - Measurement error: mean absolute difference between the nine predicted and
   reference crop means after ImageJ-equivalent 8-bit grayscale conversion and
   inversion.
-- Runtime: wall-clock milliseconds measured with `perf_counter`.
+- Runtime: median wall-clock milliseconds from three detector-only
+  `perf_counter` samples after one untimed warm-up.
 
 Detection failures are recorded as failed rows rather than removed.
 
@@ -87,15 +88,18 @@ Run the primary synthetic evaluation:
 
 ```bash
 python -m research.evaluate_cropping --synthetic \
-  --output research/results/primary
+  --output research/results/primary-new
 ```
 
 Run it with ablations:
 
 ```bash
 python -m research.evaluate_cropping --synthetic \
-  --output research/results/ablations --ablations
+  --output research/results/ablations-new --ablations
 ```
+
+The output directory must be new or empty. The evaluator refuses a nonempty
+directory and never deletes previous results; choose a fresh name for every run.
 
 ## Expected artifacts
 
@@ -106,8 +110,11 @@ Each output directory contains:
   separately for every method/condition pair. IoU and success rates use all
   rows, with detection failures contributing zero. Boundary and measurement
   error means use successful detections because those values are undefined for
-  failures. Runtime covers every detector call, including failures, and excludes
-  metric and plotting work;
+  failures. Plots include failed rows at IoU zero, matching the summaries.
+  Runtime is the median of three detector-only repetitions after one untimed
+  warm-up; it includes failed detector calls and excludes metric and plotting
+  work. The method evaluated first rotates deterministically between cases to
+  counterbalance order effects;
 - `method_comparison.png` — method-level IoU comparison;
 - `robustness_by_condition.png` — condition-level robustness comparison;
 - `failures/` — truth/prediction overlays for failures and incomplete

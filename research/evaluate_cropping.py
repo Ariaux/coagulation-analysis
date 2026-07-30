@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -347,12 +348,21 @@ def _aggregate_method_by_condition(rows: Sequence[dict]) -> dict:
     }
 
 
+def _plot_iou_values(
+    rows: Sequence[dict], method: str, condition: str | None = None
+) -> list[float]:
+    """Return plot values using the same failure-as-zero semantics as summaries."""
+    return [
+        float(row["mean_iou"])
+        for row in rows
+        if row["method"] == method
+        and (condition is None or row["condition"] == condition)
+    ]
+
+
 def _write_plots(rows: Sequence[dict], output_dir: Path) -> None:
     methods = sorted({str(row["method"]) for row in rows})
-    method_values = [
-        [float(row["mean_iou"]) for row in rows if row["method"] == method and not row["failed"]]
-        for method in methods
-    ]
+    method_values = [_plot_iou_values(rows, method) for method in methods]
     fig, axis = plt.subplots(figsize=(8, 4.5))
     axis.boxplot([values or [0.0] for values in method_values], tick_labels=methods)
     axis.set_ylabel("Mean IoU")
@@ -368,13 +378,7 @@ def _write_plots(rows: Sequence[dict], output_dir: Path) -> None:
     for offset, method in enumerate(methods):
         values = []
         for condition in conditions:
-            selected = [
-                float(row["mean_iou"])
-                for row in rows
-                if row["method"] == method
-                and row["condition"] == condition
-                and not row["failed"]
-            ]
+            selected = _plot_iou_values(rows, method, condition)
             values.append(float(np.mean(selected)) if selected else 0.0)
         axis.bar(x_values + offset * width, values, width, label=method)
     axis.set_xticks(x_values + width * (len(methods) - 1) / 2, conditions)
@@ -386,6 +390,96 @@ def _write_plots(rows: Sequence[dict], output_dir: Path) -> None:
     plt.close(fig)
 
 
+def _prepare_output_directory(output: Path) -> Path:
+    if output.exists():
+        if not output.is_dir():
+            raise ValueError(
+                f"Output path is not a directory: {output}. Choose a new empty directory."
+            )
+        if any(output.iterdir()):
+            raise ValueError(
+                f"Output directory is not empty: {output}. "
+                "Choose a new empty directory; existing files are never deleted."
+            )
+    else:
+        output.mkdir(parents=True)
+    failures = output / "failures"
+    failures.mkdir()
+    return failures
+
+
+def _filename_slug(value: str, fallback: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value)).strip("-_")
+    return slug[:80] or fallback
+
+
+def _failure_path(
+    failures: Path, case_index: int, case_name: str, method_name: str
+) -> Path:
+    case_slug = _filename_slug(case_name, "case")
+    method_slug = _filename_slug(method_name, "method")
+    candidate = (
+        failures / f"{case_index:03d}_{case_slug}__{method_slug}.png"
+    ).resolve()
+    try:
+        candidate.relative_to(failures.resolve())
+    except ValueError as exception:
+        raise ValueError(
+            "Failure overlay path escaped its output directory."
+        ) from exception
+    return candidate
+
+
+def _normalise_boxes(boxes: Sequence[BBox]) -> tuple[BBox, ...]:
+    return tuple(tuple(map(int, box)) for box in boxes)
+
+
+def _detector_call(
+    detector: Callable[[np.ndarray], tuple[BBox, ...]], image: np.ndarray
+) -> tuple[bool, tuple[BBox, ...], str]:
+    try:
+        boxes = detector(image)
+    except DetectionError as exception:
+        return False, (), str(exception)
+    return True, _normalise_boxes(boxes), ""
+
+
+def _evaluate_detector_repetitions(
+    detector: Callable[[np.ndarray], tuple[BBox, ...]],
+    image: np.ndarray,
+    clock: Callable[[], float],
+) -> tuple[tuple[BBox, ...], str, list[float]]:
+    outcomes = [_detector_call(detector, image)]
+    samples = []
+    for _ in range(3):
+        start = clock()
+        try:
+            boxes = detector(image)
+        except DetectionError as exception:
+            end = clock()
+            outcome = (False, (), str(exception))
+        else:
+            end = clock()
+            outcome = (True, _normalise_boxes(boxes), "")
+        samples.append((end - start) * 1000.0)
+        outcomes.append(outcome)
+
+    statuses = {outcome[0] for outcome in outcomes}
+    successful_boxes = [outcome[1] for outcome in outcomes if outcome[0]]
+    boxes_differ = bool(successful_boxes) and any(
+        boxes != successful_boxes[0] for boxes in successful_boxes[1:]
+    )
+    if len(statuses) != 1 or boxes_differ:
+        return (
+            (),
+            "Non-deterministic detector results across warm-up and timed repetitions.",
+            samples,
+        )
+    if not outcomes[0][0]:
+        return (), outcomes[0][2], samples
+    return outcomes[0][1], "", samples
+
+
 def evaluate_methods(
     cases: Iterable[EvaluationCase | tuple[str, np.ndarray, Sequence[BBox]]],
     output_dir: str | Path,
@@ -394,9 +488,7 @@ def evaluate_methods(
 ) -> list[dict]:
     """Evaluate methods, write tabular results, plots, and failure overlays."""
     output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    failures = output / "failures"
-    failures.mkdir(exist_ok=True)
+    failures = _prepare_output_directory(output)
     methods: list[tuple[str, Callable[[np.ndarray], tuple[BBox, ...]]]] = [
         ("fixed_ratio", fixed_ratio_detector),
         ("contour_only", contour_only_detector),
@@ -426,23 +518,21 @@ def evaluate_methods(
             ]
         )
     rows: list[dict] = []
-    for case_item in cases:
+    for case_index, case_item in enumerate(cases):
         case = _normalise_case(case_item)
         truth_means = [_mean_inverted(case.image, box) for box in case.truth]
-        for method_name, detector in methods:
-            predicted: tuple[BBox, ...] = ()
-            error = ""
-            start = clock()
-            try:
-                predicted = detector(case.image)
-            except DetectionError as exception:
-                runtime_ms = (clock() - start) * 1000.0
-                error = str(exception)
+        offset = case_index % len(methods)
+        ordered_methods = methods[offset:] + methods[:offset]
+        for method_name, detector in ordered_methods:
+            predicted, error, runtime_samples_ms = _evaluate_detector_repetitions(
+                detector, case.image, clock
+            )
+            runtime_ms = float(np.median(runtime_samples_ms))
+            if error:
                 ious = []
                 errors = []
                 measurement_error = float("nan")
             else:
-                runtime_ms = (clock() - start) * 1000.0
                 try:
                     if len(predicted) != 9:
                         raise DetectionError("Detector did not return exactly nine boxes.")
@@ -485,12 +575,17 @@ def evaluate_methods(
                 "cell_success_rate": cell_success / 9.0,
                 "all_nine_success": all_nine,
                 "measurement_mae": measurement_error if not np.isnan(measurement_error) else None,
+                "runtime_samples_ms": runtime_samples_ms,
                 "runtime_ms": runtime_ms,
             }
             rows.append(row)
             if error or not all_nine:
                 annotated = _annotate_failure(case.image, case.truth, predicted)
-                cv2.imwrite(str(failures / f"{case.name}__{method_name}.png"), annotated)
+                overlay = _failure_path(
+                    failures, case_index, case.name, method_name
+                )
+                if not cv2.imwrite(str(overlay), annotated):
+                    raise OSError(f"Could not write failure overlay: {overlay}")
 
     fields = list(rows[0]) if rows else []
     with (output / "per_image_results.csv").open("w", encoding="utf-8", newline="") as stream:
@@ -502,7 +597,10 @@ def evaluate_methods(
         "aggregation_semantics": {
             "accuracy_rates": "All rows; detection failures contribute zero.",
             "boundary_and_measurement": "Successful detections only; null when none.",
-            "runtime": "All detector calls, including failures; detector call only.",
+            "runtime": (
+                "Median of three detector-only calls after one untimed warm-up; "
+                "all calls include failures. Method-first order rotates by case."
+            ),
         },
         "by_method": _aggregate(rows, "method"),
         "by_condition": _aggregate(rows, "condition"),
