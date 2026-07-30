@@ -28,8 +28,8 @@ def log(msg):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"{msg}\n")
-    except:
-        pass
+    except OSError as exception:
+        print(f"Log file unavailable: {exception}", file=sys.stderr)
     print(msg)
 
 
@@ -229,7 +229,16 @@ def process_image(path, show_windows=True, open_folder=True):
             "Cannot open image. Try renaming it to a simple filename and try again."
         )
 
-    detection = detect_inner_squares(img)
+    try:
+        detection = detect_inner_squares(img)
+    except DetectionError as exception:
+        log(f"Grid detection failed: {exception}")
+        raise
+    outer_quad = np.rint(detection.outer_quad).astype(int).tolist()
+    log(
+        f"Grid detection confidence={detection.confidence:.3f} "
+        f"outer_quad={outer_quad}"
+    )
     original_filename = os.path.basename(path)
     artifact_key = _artifact_key(original_filename)
     parent_dir = os.path.dirname(os.path.abspath(path))
@@ -262,6 +271,11 @@ def process_image(path, show_windows=True, open_folder=True):
                 }
             )
             results.append(result)
+            log(
+                f"Cell #{square.idx} confidence={result['confidence']:.3f} "
+                f"recovered={str(result['recovered']).lower()} "
+                f"source_bbox={result['source_bbox']}"
+            )
             crop_path = os.path.join(staging_dir, f"cell_{square.idx:02d}.png")
             if not _write_image(crop_path, cell):
                 raise OSError(f"Could not write crop: {crop_path}")
@@ -327,7 +341,7 @@ def main():
         _main()
     except DetectionError as exc:
         message = f"Grid detection failed: {exc}"
-        log(message)
+        print(message)
         input(f"{message}\nPress Enter to exit...")
     except Exception:
         msg = traceback.format_exc()

@@ -124,6 +124,11 @@ internet connection.
 - **Chinese paths:** Chinese and other Unicode file/folder names are supported.
 - **Similar filenames:** outputs are isolated by a stable hash of the exact
   original filename, including its extension.
+- **Audit log:** `coagulation_log.txt` on the Windows Desktop records overall
+  detection confidence, outer-fixture coordinates, each cell's confidence,
+  recovery status and source bounding box, plus actionable detection failures.
+  If the Desktop log cannot be written, the console shows a `Log file
+  unavailable` warning.
 
 ## Classical CV Pipeline (Variable-Grid CLI, no GPU needed)
 

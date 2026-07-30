@@ -1,4 +1,6 @@
 import csv
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -14,6 +16,68 @@ from tests.test_grid_detector import make_fixture
 
 
 class StandalonePipelineTests(unittest.TestCase):
+    def test_process_image_writes_complete_detection_audit_log(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "audit.png")
+            log_path = os.path.join(temp_dir, "audit.log")
+            self.assertTrue(cv2.imwrite(image_path, image))
+
+            with mock.patch.object(app_standalone, "LOG_FILE", log_path):
+                outputs = process_image(
+                    image_path,
+                    show_windows=False,
+                    open_folder=False,
+                )
+
+            with open(log_path, encoding="utf-8") as audit_file:
+                audit = audit_file.read()
+            self.assertIn("Grid detection confidence=", audit)
+            self.assertIn("outer_quad=", audit)
+            for cell in outputs["cells"]:
+                expected = (
+                    f"Cell #{cell['idx']} confidence={cell['confidence']:.3f} "
+                    f"recovered={str(cell['recovered']).lower()} "
+                    f"source_bbox={cell['source_bbox']}"
+                )
+                self.assertIn(expected, audit)
+
+    def test_process_image_logs_detection_failure_before_reraising(self):
+        image = cv2.cvtColor(
+            255 * cv2.getStructuringElement(cv2.MORPH_RECT, (900, 900)),
+            cv2.COLOR_GRAY2BGR,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "invalid.png")
+            log_path = os.path.join(temp_dir, "failure.log")
+            self.assertTrue(cv2.imwrite(image_path, image))
+
+            with mock.patch.object(app_standalone, "LOG_FILE", log_path):
+                with self.assertRaises(DetectionError) as raised:
+                    process_image(
+                        image_path,
+                        show_windows=False,
+                        open_folder=False,
+                    )
+
+            with open(log_path, encoding="utf-8") as audit_file:
+                audit = audit_file.read()
+            self.assertIn("Grid detection failed:", audit)
+            self.assertIn(str(raised.exception), audit)
+
+    def test_log_warns_on_stderr_when_log_file_is_unavailable(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("builtins.open", side_effect=OSError("read-only")), (
+            contextlib.redirect_stdout(stdout)
+        ), contextlib.redirect_stderr(stderr):
+            app_standalone.log("original audit message")
+
+        self.assertIn("original audit message", stdout.getvalue())
+        self.assertIn("Log file unavailable", stderr.getvalue())
+        self.assertIn("read-only", stderr.getvalue())
+
     def test_write_failure_does_not_publish_partial_output(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
