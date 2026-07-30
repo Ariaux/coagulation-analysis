@@ -119,6 +119,54 @@ class StandalonePipelineTests(unittest.TestCase):
                         0.05,
                     )
 
+    def test_rotated_low_resolution_cells_exclude_frame_bleed(self):
+        for size in (180, 200):
+            for angle in (-4.0, 3.0):
+                with (
+                    self.subTest(size=size, angle=angle),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    image, _ = make_fixture(
+                        size=size,
+                        angle=angle,
+                        brightness=210,
+                    )
+                    image_path = os.path.join(
+                        temp_dir,
+                        f"empty_{size}_{angle:+.0f}.png",
+                    )
+                    self.assertTrue(cv2.imwrite(image_path, image))
+
+                    outputs = process_image(
+                        image_path,
+                        show_windows=False,
+                        open_folder=False,
+                    )
+
+                    self.assertEqual(9, len(outputs["cells"]))
+                    for cell in outputs["cells"]:
+                        self.assertLessEqual(cell["mean"], 52.0)
+                        crop = load_image(
+                            os.path.join(
+                                outputs["output_dir"],
+                                f"cell_{cell['idx']:02d}.png",
+                            )
+                        )
+                        self.assertGreater(crop.size, 0)
+                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        boundary = cv2.hconcat(
+                            [
+                                gray[0:1, :],
+                                gray[-1:, :],
+                                gray[:, 0:1].T,
+                                gray[:, -1:].T,
+                            ]
+                        )
+                        self.assertLessEqual(
+                            float((boundary < 100).mean()),
+                            0.05,
+                        )
+
     def test_same_stem_different_extensions_keep_distinct_outputs(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
