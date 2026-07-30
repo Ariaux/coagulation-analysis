@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from grid_detector import DetectionError, detect_inner_squares
+from grid_detector import DetectionError, DetectorOptions, detect_inner_squares
 
 
 def make_fixture(
@@ -86,6 +86,49 @@ def make_fixture(
     return image, expected
 
 
+def make_incomplete_fixture(size=900, brightness=210):
+    image = np.full((size, size, 3), brightness, dtype=np.uint8)
+    margin = int(round(size * 0.04))
+    cell = (size - 2 * margin) // 3
+    line = max(8, size // 90)
+    dark = (25, 25, 25)
+    fixture_end = margin + 3 * cell
+    cv2.rectangle(
+        image,
+        (margin, margin),
+        (fixture_end, fixture_end),
+        dark,
+        line,
+    )
+    for row in range(3):
+        for col in range(3):
+            x0 = margin + col * cell
+            y0 = margin + row * cell
+            x1 = x0 + cell
+            y1 = y0 + cell
+            cv2.rectangle(image, (x0, y0), (x1, y1), dark, line)
+            inset = int(round(cell * 0.22))
+            inner_left = x0 + inset
+            inner_top = y0 + inset
+            inner_right = x0 + cell - inset
+            inner_bottom = y0 + cell - inset
+            cv2.line(
+                image,
+                (inner_left, inner_top),
+                (inner_left, inner_bottom),
+                dark,
+                line,
+            )
+            cv2.line(
+                image,
+                (inner_left, inner_top),
+                (inner_right, inner_top),
+                dark,
+                line,
+            )
+    return image
+
+
 class GridDetectorTests(unittest.TestCase):
     def test_detects_nine_squares_in_row_major_order(self):
         image, expected = make_fixture()
@@ -134,6 +177,22 @@ class GridDetectorTests(unittest.TestCase):
 
         with self.assertRaises(DetectionError):
             detect_inner_squares(image)
+
+    def test_rejects_cells_with_incomplete_inner_frames(self):
+        image = make_incomplete_fixture()
+
+        for options in (None, DetectorOptions(validate_grid=False)):
+            with self.subTest(options=options):
+                with self.assertRaises(DetectionError):
+                    detect_inner_squares(image, options)
+
+    def test_rejects_non_uint8_images_with_actionable_message(self):
+        image, _ = make_fixture()
+
+        for dtype in (np.float32, np.int32):
+            with self.subTest(dtype=dtype):
+                with self.assertRaisesRegex(DetectionError, "uint8"):
+                    detect_inner_squares(image.astype(dtype))
 
 
 if __name__ == "__main__":

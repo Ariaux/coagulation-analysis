@@ -44,9 +44,16 @@ class DetectorOptions:
 @dataclass
 class _Candidate:
     bbox: tuple[int, int, int, int]
-    edge_strength: float
+    edge_strengths: tuple[float, float, float, float]
     confidence: float = 0.0
     recovered: bool = False
+
+    @property
+    def edge_strength(self) -> float:
+        return float(np.mean(self.edge_strengths))
+
+
+_MIN_EDGE_CONTRAST = 0.10
 
 
 def _order_quad(points: np.ndarray) -> np.ndarray:
@@ -217,26 +224,22 @@ def _refine_template_squares(
                 x1 = int(round(right - right_width / 2.0 - 2))
                 y0 = int(round(top + top_width / 2.0 + 2))
                 y1 = int(round(bottom - bottom_width / 2.0 - 2))
-                strength = float(
-                    np.mean(
-                        [
-                            left_strength,
-                            right_strength,
-                            top_strength,
-                            bottom_strength,
-                        ]
-                    )
+                edge_strengths = (
+                    left_strength,
+                    right_strength,
+                    top_strength,
+                    bottom_strength,
                 )
             else:
                 x0 = int(round(predicted_left + 2))
                 x1 = int(round(predicted_right - 2))
                 y0 = int(round(predicted_top + 2))
                 y1 = int(round(predicted_bottom - 2))
-                strength = 0.7
+                edge_strengths = (0.7, 0.7, 0.7, 0.7)
 
             if x1 <= x0 or y1 <= y0:
                 continue
-            candidates.append(_Candidate((x0, y0, x1, y1), strength))
+            candidates.append(_Candidate((x0, y0, x1, y1), edge_strengths))
     return candidates
 
 
@@ -247,6 +250,15 @@ def _validate_grid(
         raise DetectionError(
             "No inner frames were found. Make sure the complete fixture is visible."
         )
+    if any(
+        min(candidate.edge_strengths) < _MIN_EDGE_CONTRAST
+        for candidate in raw
+        if not candidate.recovered
+    ):
+        raise DetectionError(
+            "One or more inner frames are incomplete or unclear. "
+            "Use even lighting and keep every dark edge visible."
+        )
     if not enabled:
         for candidate in raw:
             candidate.confidence = min(1.0, max(0.0, candidate.edge_strength))
@@ -256,7 +268,6 @@ def _validate_grid(
             f"Expected nine inner frames but found {len(raw)}. "
             "Retake the photo with all cells unobstructed."
         )
-
     widths = np.array(
         [candidate.bbox[2] - candidate.bbox[0] for candidate in raw],
         dtype=float,
@@ -372,6 +383,10 @@ def detect_inner_squares(
     if min(image.shape[:2]) < 180:
         raise DetectionError(
             "The image is too small. Use an image at least 180 pixels on each side."
+        )
+    if image.dtype != np.uint8:
+        raise DetectionError(
+            "Expected a uint8 color image with channel values from 0 to 255."
         )
 
     options = options or DetectorOptions()
