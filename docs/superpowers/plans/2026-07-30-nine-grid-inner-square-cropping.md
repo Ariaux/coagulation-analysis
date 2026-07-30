@@ -17,6 +17,10 @@
 - Modify `app_standalone.py`: fixed 3×3 workflow, detector integration, inner-square cropping, result metadata, and user-facing errors.
 - Modify `README.md`: offline Windows usage, photography constraints, output semantics, and troubleshooting.
 - Modify `.github/workflows/build.yml`: run detector tests before packaging and explicitly include the detector module.
+- Create `research/evaluate_cropping.py`: reproducible baseline, ablation, perturbation, metric, CSV/JSON, and figure generation.
+- Create `research/annotate_inner_squares.py`: local real-photo ground-truth annotation without network access.
+- Create `research/EXPERIMENTS.md`: paper-ready protocol, commands, metric definitions, and non-fabrication rules.
+- Create `requirements_research.txt`: research-only plotting dependency kept out of the Windows app.
 
 ### Task 1: Detect and Number the Nine Inner Squares
 
@@ -157,13 +161,32 @@ class GridDetection:
     confidence: float
 
 
-def detect_inner_squares(image: np.ndarray) -> GridDetection:
+@dataclass(frozen=True)
+class DetectorOptions:
+    rectify: bool = True
+    refine_edges: bool = True
+    validate_grid: bool = True
+
+
+def detect_inner_squares(
+    image: np.ndarray,
+    options: DetectorOptions | None = None,
+) -> GridDetection:
+    options = options or DetectorOptions()
     if image is None or image.ndim != 3 or min(image.shape[:2]) < 180:
         raise DetectionError("Image is missing or too small.")
     outer_quad = _find_outer_quad(image)
-    rectified, source_to_rectified, rectified_to_source = _rectify(image, outer_quad)
-    raw = _refine_template_squares(rectified)
-    validated = _validate_grid(raw, rectified.shape[:2])
+    rectified, source_to_rectified, rectified_to_source = _rectify(
+        image,
+        outer_quad,
+        enabled=options.rectify,
+    )
+    raw = _refine_template_squares(rectified, enabled=options.refine_edges)
+    validated = _validate_grid(
+        raw,
+        rectified.shape[:2],
+        enabled=options.validate_grid,
+    )
     squares = _map_squares(validated, rectified_to_source, image.shape[:2])
     confidence = float(np.mean([square.confidence for square in squares]))
     return GridDetection(
@@ -463,7 +486,181 @@ git add app_standalone.py tests/test_standalone_pipeline.py
 git commit -m "feat: crop inner squares in offline desktop app"
 ```
 
-### Task 4: Document and Verify the Windows Offline Build
+### Task 4: Add Reproducible Paper Experiments
+
+**Files:**
+- Create: `research/__init__.py`
+- Create: `research/evaluate_cropping.py`
+- Create: `research/annotate_inner_squares.py`
+- Create: `research/EXPERIMENTS.md`
+- Create: `requirements_research.txt`
+- Create: `tests/test_research_evaluation.py`
+
+- [ ] **Step 1: Write failing metric and benchmark tests**
+
+Create `tests/test_research_evaluation.py` with tests for exact-match IoU, known pixel displacement, deterministic perturbations, and three-method output:
+
+```python
+import tempfile
+import unittest
+
+import numpy as np
+
+from research.evaluate_cropping import (
+    boundary_error,
+    box_iou,
+    evaluate_methods,
+    make_perturbations,
+)
+from tests.test_grid_detector import make_fixture
+
+
+class ResearchEvaluationTests(unittest.TestCase):
+    def test_metrics_have_known_values(self):
+        truth = (10, 20, 110, 120)
+        shifted = (15, 20, 115, 120)
+        self.assertEqual(box_iou(truth, truth), 1.0)
+        self.assertAlmostEqual(boundary_error(truth, shifted), 2.5)
+        self.assertAlmostEqual(box_iou(truth, shifted), 95 / 105)
+
+    def test_perturbations_are_deterministic(self):
+        image, truth = make_fixture(filled=(1, 2, 4, 5, 8))
+        first = make_perturbations(image, truth, seed=20260730)
+        second = make_perturbations(image, truth, seed=20260730)
+        self.assertEqual([case.name for case in first], [case.name for case in second])
+        for left, right in zip(first, second):
+            np.testing.assert_array_equal(left.image, right.image)
+            self.assertEqual(left.truth, right.truth)
+
+    def test_benchmark_reports_all_three_methods(self):
+        image, truth = make_fixture(filled=(1, 2, 4, 5, 8))
+        with tempfile.TemporaryDirectory() as output_dir:
+            rows = evaluate_methods(
+                [("synthetic-001", image, truth)],
+                output_dir=output_dir,
+            )
+        self.assertEqual(
+            {row["method"] for row in rows},
+            {"fixed_ratio", "contour_only", "hybrid"},
+        )
+        self.assertTrue(all("mean_iou" in row for row in rows))
+        self.assertTrue(all("runtime_ms" in row for row in rows))
+```
+
+- [ ] **Step 2: Run the research tests and verify they fail**
+
+Run:
+
+```bash
+/Users/aria/Downloads/chenmeixi/.venv/bin/python -m unittest tests.test_research_evaluation -v
+```
+
+Expected: `ERROR` with `ModuleNotFoundError: No module named 'research'`.
+
+- [ ] **Step 3: Implement metrics, baselines, perturbations, and ablations**
+
+In `research/evaluate_cropping.py`, define:
+
+```python
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class EvaluationCase:
+    name: str
+    image: np.ndarray
+    truth: tuple[tuple[int, int, int, int], ...]
+    condition: str
+    level: float
+
+
+def box_iou(a, b) -> float:
+    left = max(a[0], b[0])
+    top = max(a[1], b[1])
+    right = min(a[2], b[2])
+    bottom = min(a[3], b[3])
+    intersection = max(0, right - left) * max(0, bottom - top)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union else 0.0
+
+
+def boundary_error(a, b) -> float:
+    return float(np.mean(np.abs(np.asarray(a, dtype=float) - np.asarray(b, dtype=float))))
+```
+
+Add `fixed_ratio_detector(image)`, `contour_only_detector(image)`, `hybrid_detector(image)`, `make_perturbations(image, truth, seed=20260730)`, and `evaluate_methods(cases, output_dir, ablations=False)` with these exact behaviors:
+
+- `box_iou`: intersection area divided by union area, returning `0.0` for no overlap.
+- `boundary_error`: mean absolute difference of left, top, right, and bottom coordinates.
+- `fixed_ratio_detector`: detect only the outer fixture and return template boxes at the calibrated 22%/78% insets without local refinement.
+- `contour_only_detector`: divide the detected outer fixture into nine cells and choose the largest near-square contour inside each cell without shared-grid recovery.
+- `hybrid_detector`: call `detect_inner_squares`.
+- `make_perturbations`: create deterministic cases for rotations `[-5, -3, 3, 5]`, brightness multipliers `[0.7, 0.85, 1.15, 1.3]`, scales `[0.85, 1.15]`, Gaussian noise standard deviations `[8, 16]`, and content/empty patterns; transform ground-truth boxes with the same affine matrices.
+- `evaluate_methods`: time each method with `time.perf_counter`, compute per-image mean IoU, mean boundary error, single-cell success at IoU ≥ 0.85, all-nine success, and measurement mean absolute error; catch `DetectionError` as a recorded failed result.
+- when `ablations=True`, evaluate hybrid variants by passing `DetectorOptions(rectify=False)`, `DetectorOptions(refine_edges=False)`, and `DetectorOptions(validate_grid=False)` to `detect_inner_squares`.
+
+Write `per_image_results.csv`, `summary.json`, `method_comparison.png`, `robustness_by_condition.png`, and a `failures/` directory. Use Matplotlib only in the research module, never in the desktop runtime.
+
+- [ ] **Step 4: Add local ground-truth annotation**
+
+Implement `research/annotate_inner_squares.py` as a local OpenCV tool. The annotator opens one photo at a time, asks the researcher to click top-left and bottom-right corners for cells 1–9 in row-major order, permits Backspace to redo the current cell, draws numbered rectangles, and writes:
+
+```json
+{
+  "image": "sample.jpg",
+  "annotator": "manual",
+  "boxes": [
+    {"idx": 1, "bbox": [x1, y1, x2, y2]}
+  ]
+}
+```
+
+Require exactly nine non-empty boxes before saving. Do not offer automatic pre-labels, because real-photo ground truth must remain independent of the evaluated detector.
+
+- [ ] **Step 5: Document the paper protocol**
+
+Create `research/EXPERIMENTS.md` with:
+
+- the research question and three compared methods;
+- independent real-photo annotation protocol;
+- synthetic perturbation matrix and fixed random seed;
+- definitions for IoU, boundary error, cell success, all-nine success, measurement error, and runtime;
+- ablation definitions;
+- exact commands to annotate and evaluate;
+- a results-table template containing blank cells marked `—`, never invented values;
+- a warning that at least two people should independently review a subset of manual labels before reporting real-image accuracy.
+
+Create `requirements_research.txt`:
+
+```text
+opencv-python
+numpy
+matplotlib
+```
+
+- [ ] **Step 6: Run research tests and smoke-test generated artifacts**
+
+Run:
+
+```bash
+/Users/aria/Downloads/chenmeixi/.venv/bin/python -m unittest tests.test_research_evaluation -v
+/Users/aria/Downloads/chenmeixi/.venv/bin/python -m research.evaluate_cropping --synthetic --output research/results/smoke
+```
+
+Expected: all research tests report `ok`; the smoke command writes non-empty CSV, JSON, two PNG charts, and exits with code 0.
+
+- [ ] **Step 7: Commit the research evaluation tooling**
+
+```bash
+git add research requirements_research.txt tests/test_research_evaluation.py
+git commit -m "feat: add reproducible cropping evaluation"
+```
+
+### Task 5: Document and Verify the Windows Offline Build
 
 **Files:**
 - Modify: `README.md`
@@ -540,7 +737,7 @@ git add README.md .github/workflows/build.yml
 git commit -m "docs: describe fixed nine-grid Windows workflow"
 ```
 
-### Task 5: Completion Review
+### Task 6: Completion Review
 
 **Files:**
 - Review only: `grid_detector.py`
@@ -549,10 +746,13 @@ git commit -m "docs: describe fixed nine-grid Windows workflow"
 - Review only: `tests/test_standalone_pipeline.py`
 - Review only: `README.md`
 - Review only: `.github/workflows/build.yml`
+- Review only: `research/evaluate_cropping.py`
+- Review only: `research/annotate_inner_squares.py`
+- Review only: `research/EXPERIMENTS.md`
 
 - [ ] **Step 1: Compare implementation against the design specification**
 
-Read `docs/superpowers/specs/2026-07-30-nine-grid-inner-square-cropping-design.md` and confirm every in-scope requirement maps to code or a test: fixed 3×3, inner-edge inset, row-major numbering, empty-cell retention, confidence failure, preview, nine crops, heatmap, CSV/JSON coordinates, offline operation, and Windows build.
+Read `docs/superpowers/specs/2026-07-30-nine-grid-inner-square-cropping-design.md` and confirm every in-scope requirement maps to code or a test: fixed 3×3, inner-edge inset, row-major numbering, empty-cell retention, confidence failure, preview, nine crops, heatmap, CSV/JSON coordinates, offline operation, Windows build, three-method comparison, ablations, deterministic perturbations, independent real-photo annotation, metrics, and paper artifacts.
 
 - [ ] **Step 2: Check repository state and commit scope**
 
