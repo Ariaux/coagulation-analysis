@@ -230,10 +230,10 @@ Raw Cell Image
 ```
 Phase 1: Segmentation Pre-training (10 epochs)
 ┌────────────────────────────────────┐
-│  Encoder (frozen ❄️)               │
+│  Encoder (frozen)                  │
 │       │                            │
-│       ├── Decoder (training 🔥)     │
-│       └── Seg Head (training 🔥)    │
+│       ├── Decoder (training)       │
+│       └── Seg Head (training)      │
 │                                    │
 │  Loss: Dice + BCE (segmentation)   │
 │  LR:   1e-3                        │
@@ -244,11 +244,11 @@ Phase 1: Segmentation Pre-training (10 epochs)
                 ▼
 Phase 2: Joint Multi-Task Training (50 epochs)
 ┌────────────────────────────────────┐
-│  Encoder (unfrozen 🔥)             │
+│  Encoder (unfrozen)                │
 │       │                            │
-│       ├── Decoder + Seg Head 🔥    │
-│       ├── Regression Head 🔥       │
-│       └── Classification Head 🔥   │
+│       ├── Decoder + Seg Head       │
+│       ├── Regression Head          │
+│       └── Classification Head      │
 │                                    │
 │  Loss: uncertainty-weighted        │
 │  LR:   3e-4, cosine warmup         │
