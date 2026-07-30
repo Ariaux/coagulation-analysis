@@ -5,9 +5,17 @@ Coagulation Quantification — Standalone Desktop App
 Usage: drag an image file onto the app icon, or:
        CoagulationAnalysis.exe image.jpg
 """
-import sys, os, json, traceback
+import csv
+import json
+import os
+import subprocess
+import sys
+import traceback
+
 import numpy as np
 import cv2
+
+from grid_detector import DetectionError, GridDetection, detect_inner_squares
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "Desktop", "coagulation_log.txt")
 
@@ -37,9 +45,10 @@ def measure(inverted):
     }
 
 
-def heatmap_image(results, n_rows, n_cols):
+def heatmap_image(results):
     means = [r["mean"] for r in results]
     vmin, vmax = min(means), max(means)
+    n_rows, n_cols = 3, 3
     cs, pad = 100, 5
     hh, ww = n_rows*(cs+pad)+pad+50, n_cols*(cs+pad)+pad
     hm = np.full((hh, ww, 3), 35, dtype=np.uint8)
@@ -70,76 +79,180 @@ def load_image(path):
     return img
 
 
-def pick_grid(n_rows, n_cols, w, h, sw, sh):
-    """Show a small OpenCV window to let user pick grid rows/cols."""
-    canvas = np.full((400, 500, 3), 40, dtype=np.uint8)
-    cv2.putText(canvas, "Grid Settings", (150, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 1)
-    cv2.putText(canvas, f"Image: {w}x{h}  ROI: {sw}x{sh}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180,180,180), 1)
-    cv2.putText(canvas, f"Rows: {n_rows}    Cols: {n_cols}    Cells: {n_rows*n_cols}", (30, 130),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 1)
-    cv2.putText(canvas, "UP/DOWN: change rows", (30, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-    cv2.putText(canvas, "LEFT/RIGHT: change cols", (30, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-    cv2.putText(canvas, "ENTER: confirm   ESC: quit", (30, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
-    while True:
-        disp = canvas.copy()
-        cv2.putText(disp, f"  {n_rows} x {n_cols}  =  {n_rows*n_cols} cells", (120, 350),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-        cv2.imshow("Grid Settings", disp)
-        key = cv2.waitKey(0) & 0xFF
-        if key == 13: break  # Enter
-        if key == 27: cv2.destroyAllWindows(); sys.exit(0)  # Esc
-        if key == 82 and n_rows > 1: n_rows -= 1  # Up
-        if key == 84 and n_rows < 10: n_rows += 1  # Down
-        if key == 81 and n_cols > 1: n_cols -= 1  # Left
-        if key == 83 and n_cols < 10: n_cols += 1  # Right
+def draw_detection_overlay(img, detection: GridDetection):
+    overlay = img.copy()
+    for square in detection.squares:
+        color = (0, 255, 0) if square.confidence >= 0.55 else (0, 0, 255)
+        quad = np.rint(square.source_quad).astype(np.int32)
+        cv2.polylines(overlay, [quad], True, color, 2)
+        center = tuple(np.rint(quad.mean(axis=0)).astype(int))
+        cv2.putText(
+            overlay,
+            f"#{square.idx}",
+            (center[0] - 12, center[1] + 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            2,
+        )
+    return overlay
+
+
+def save_results(out_dir, base_name, results):
+    csv_path = os.path.join(out_dir, f"{base_name}_results.csv")
+    json_path = os.path.join(out_dir, f"{base_name}_results.json")
+    csv_header = [
+        "cell",
+        "row",
+        "col",
+        "mean",
+        "median",
+        "std",
+        "min",
+        "max",
+        "int_den",
+        "area_px",
+        "confidence",
+        "recovered",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(csv_header)
+        for result in results:
+            writer.writerow(
+                [
+                    result["idx"],
+                    result["row"],
+                    result["col"],
+                    result["mean"],
+                    result["median"],
+                    result["std"],
+                    result["min"],
+                    result["max"],
+                    result["int_den"],
+                    result["area_px"],
+                    result["confidence"],
+                    result["recovered"],
+                ]
+            )
+
+    with open(json_path, "w", encoding="utf-8") as json_file:
+        json.dump(
+            {"image": base_name, "grid": "3x3", "cells": results},
+            json_file,
+            indent=2,
+        )
+    return csv_path, json_path
+
+
+def show_results(overlay, heatmap, base_name):
+    height, width = overlay.shape[:2]
+    if max(width, height) > 700:
+        display_width = min(width, 700)
+        display_overlay = cv2.resize(
+            overlay, (display_width, int(display_width / width * height))
+        )
+    else:
+        display_overlay = overlay.copy()
+    display_heatmap = cv2.resize(
+        heatmap,
+        (
+            display_overlay.shape[1],
+            display_overlay.shape[1] * heatmap.shape[0] // heatmap.shape[1],
+        ),
+    )
+    cv2.imshow(
+        f"Results - {base_name}  (any key to close)",
+        np.vstack([display_overlay, display_heatmap]),
+    )
+    cv2.waitKey(0)
     cv2.destroyAllWindows()
-    return n_rows, n_cols
 
 
-def confirm_grid(img, sx, sy, sw, sh, n_rows, n_cols):
-    """Show grid overlay, let user nudge with arrow keys, Enter to confirm."""
-    shift = 2
-    h, w = img.shape[:2]
-    while True:
-        cell_w, cell_h = sw//n_cols, sh//n_rows
-        overlay = img.copy()
-        cv2.rectangle(overlay, (sx,sy), (sx+sw,sy+sh), (0,255,255), 3)
-        for r in range(n_rows):
-            for c in range(n_cols):
-                xs, ys = sx+c*cell_w, sy+r*cell_h
-                cv2.rectangle(overlay, (xs,ys), (xs+cell_w,ys+cell_h), (0,255,0), 1)
-                cv2.putText(overlay, str(r*n_cols+c+1), (xs+cell_w//2-12, ys+cell_h//2+6),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+def open_output_folder(out_dir):
+    if sys.platform == "win32":
+        os.startfile(out_dir)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", out_dir], check=False)
+    else:
+        subprocess.run(["xdg-open", out_dir], check=False)
 
-        max_dim = 1200
-        scale = max_dim/max(w,h) if max(w,h)>max_dim else 1.0
-        if scale != 1.0:
-            disp = cv2.resize(overlay, (int(w*scale), int(h*scale)))
-        else:
-            disp = overlay.copy()
 
-        cv2.putText(disp, f"ROI:({sx},{sy}) {sw}x{sh}  Grid:{n_rows}x{n_cols}  Step:{shift}px",
-                   (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255), 1)
-        cv2.putText(disp, "Arrow=nudge  +/-=step  Enter=confirm  Esc=cancel",
-                   (10, disp.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255), 1)
+def process_image(path, show_windows=True, open_folder=True):
+    img = load_image(path)
+    if img is None:
+        raise ValueError(
+            "Cannot open image. Try renaming it to a simple filename and try again."
+        )
 
-        cv2.imshow("Confirm Grid - Arrows: nudge, Enter: confirm", disp)
-        key = cv2.waitKey(0) & 0xFF
-        cv2.destroyAllWindows()
+    detection = detect_inner_squares(img)
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    out_dir = os.path.join(
+        os.path.dirname(os.path.abspath(path)), f"{base_name}_analysis"
+    )
+    os.makedirs(out_dir, exist_ok=True)
 
-        if key == 13: return sx, sy, sw, sh, n_rows, n_cols  # Enter
-        if key == 27: sys.exit(0)  # Esc
-        if key == 81: sx = max(0, sx-shift)
-        if key == 83: sx = min(w-sw, sx+shift)
-        if key == 82: sy = max(0, sy-shift)
-        if key == 84: sy = min(h-sh, sy+shift)
-        if key in (43,61): shift = min(shift*2, 50)
-        if key == 45: shift = max(shift//2, 1)
+    results = []
+    for square in detection.squares:
+        x1, y1, x2, y2 = square.rectified_bbox
+        cell = detection.rectified[y1:y2, x1:x2]
+        if cell.size == 0:
+            raise DetectionError(
+                f"Detected crop #{square.idx} is empty. Retake the photo "
+                "with the full grid in frame."
+            )
+        inverted = 255 - to_8bit(cell)
+        result = measure(inverted)
+        result.update(
+            {
+                "idx": square.idx,
+                "row": square.row,
+                "col": square.col,
+                "confidence": round(float(square.confidence), 3),
+                "recovered": bool(square.recovered),
+                "crop_quad": np.rint(square.source_quad).astype(int).tolist(),
+            }
+        )
+        results.append(result)
+        crop_path = os.path.join(out_dir, f"cell_{square.idx:02d}.png")
+        if not cv2.imwrite(crop_path, cell):
+            raise OSError(f"Could not write crop: {crop_path}")
+
+    overlay = draw_detection_overlay(img, detection)
+    overlay_path = os.path.join(out_dir, f"{base_name}_grid_overlay.png")
+    if not cv2.imwrite(overlay_path, overlay):
+        raise OSError(f"Could not write overlay: {overlay_path}")
+
+    heatmap = heatmap_image(results)
+    heatmap_path = os.path.join(out_dir, f"{base_name}_heatmap.png")
+    if not cv2.imwrite(heatmap_path, heatmap):
+        raise OSError(f"Could not write heatmap: {heatmap_path}")
+
+    csv_path, json_path = save_results(out_dir, base_name, results)
+    log(f"Done. {len(results)} cells analyzed. Output: {out_dir}")
+
+    if show_windows:
+        show_results(overlay, heatmap, base_name)
+    if open_folder:
+        open_output_folder(out_dir)
+
+    return {
+        "cells": results,
+        "output_dir": out_dir,
+        "overlay_path": overlay_path,
+        "heatmap_path": heatmap_path,
+        "csv_path": csv_path,
+        "json_path": json_path,
+    }
 
 
 def main():
     try:
         _main()
+    except DetectionError as exc:
+        message = f"Grid detection failed: {exc}"
+        log(message)
+        input(f"{message}\nPress Enter to exit...")
     except Exception:
         msg = traceback.format_exc()
         log(f"FATAL ERROR:\n{msg}")
@@ -166,90 +279,7 @@ def _main():
         input("File not found. Press Enter.")
         sys.exit(1)
 
-    img = load_image(path)
-    if img is None:
-        log("Cannot open image - try renaming to English filename with no spaces")
-        input("Cannot open image. Try renaming to a simple name. Press Enter.")
-        sys.exit(1)
-
-    h, w = img.shape[:2]
-    base_name = os.path.splitext(os.path.basename(path))[0]
-    out_dir = os.path.join(os.path.dirname(path) or ".", f"{base_name}_analysis")
-    os.makedirs(out_dir, exist_ok=True)
-    log(f"Loaded: {w}x{h}px  Output: {out_dir}")
-
-    # ── Auto-detect slide ROI ──
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if np.mean(binary)/255 < 0.5: binary = cv2.bitwise_not(binary)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9,9))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    sx, sy, sw, sh = 0, 0, w, h
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        sx, sy, sw, sh = cv2.boundingRect(largest)
-        if sw < w*0.1 or sh < h*0.1: sx, sy, sw, sh = 0, 0, w, h
-    log(f"Auto-detected ROI: ({sx},{sy}) {sw}x{sh}")
-
-    # ── Pick grid ──
-    n_rows, n_cols = pick_grid(3, 6, w, h, sw, sh)
-    log(f"Grid: {n_rows}x{n_cols}")
-
-    # ── Confirm with nudge ──
-    sx, sy, sw, sh, n_rows, n_cols = confirm_grid(img, sx, sy, sw, sh, n_rows, n_cols)
-
-    # ── Analyze ──
-    cell_w, cell_h = sw//n_cols, sh//n_rows
-    results = []
-    for r in range(n_rows):
-        for c in range(n_cols):
-            xs, ys = sx+c*cell_w, sy+r*cell_h
-            cell = img[ys:ys+cell_h, xs:xs+cell_w]
-            inv = 255 - to_8bit(cell)
-            m = measure(inv)
-            m.update({"idx": r*n_cols+c+1, "row": r+1, "col": c+1})
-            results.append(m)
-            cv2.imwrite(os.path.join(out_dir, f"cell_{m['idx']:02d}.png"), cell)
-
-    # Save outputs
-    overlay = img.copy()
-    cv2.rectangle(overlay, (sx,sy), (sx+sw,sy+sh), (0,255,255), 3)
-    for r in range(n_rows):
-        for c in range(n_cols):
-            xs, ys = sx+c*cell_w, sy+r*cell_h
-            cv2.rectangle(overlay, (xs,ys), (xs+cell_w,ys+cell_h), (0,255,0), 1)
-            cv2.putText(overlay, str(r*n_cols+c+1), (xs+cell_w//2-12, ys+cell_h//2+6),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
-    cv2.imwrite(os.path.join(out_dir, f"{base_name}_grid_overlay.png"), overlay)
-
-    hm = heatmap_image(results, n_rows, n_cols)
-    cv2.imwrite(os.path.join(out_dir, f"{base_name}_heatmap.png"), hm)
-
-    with open(os.path.join(out_dir, f"{base_name}_results.csv"), "w") as f:
-        f.write("cell,row,col,mean,median,std,min,max,int_den,area_px\n")
-        for r in results:
-            f.write(f"{r['idx']},{r['row']},{r['col']},{r['mean']},{r['median']},"
-                    f"{r['std']},{r['min']},{r['max']},{r['int_den']},{r['area_px']}\n")
-
-    with open(os.path.join(out_dir, f"{base_name}_results.json"), "w") as f:
-        json.dump({"image": base_name, "cells": results}, f, indent=2)
-
-    log(f"Done. {len(results)} cells analyzed.")
-
-    # Show results
-    d1 = cv2.resize(overlay, (min(w,700), int(min(w,700)/w*h))) if max(w,h)>700 else overlay.copy()
-    d2 = cv2.resize(hm, (d1.shape[1], d1.shape[1]*hm.shape[0]//hm.shape[1]))
-    cv2.imshow(f"Results - {base_name}  (any key to close)", np.vstack([d1,d2]))
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    # Open output folder
-    if sys.platform == "win32":
-        os.startfile(out_dir)
-    else:
-        os.system(f'open "{out_dir}"')
+    process_image(path)
 
 
 if __name__ == "__main__":
