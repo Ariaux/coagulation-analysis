@@ -9,6 +9,7 @@ import cv2
 
 import app_standalone
 from app_standalone import load_image, process_image
+from grid_detector import DetectionError
 from tests.test_grid_detector import make_fixture
 
 
@@ -83,89 +84,57 @@ class StandalonePipelineTests(unittest.TestCase):
                 header,
             )
 
-    def test_low_resolution_empty_cells_exclude_the_inner_frame(self):
-        for size in (200, 300):
-            with self.subTest(size=size), tempfile.TemporaryDirectory() as temp_dir:
-                image, _ = make_fixture(size=size, brightness=210)
-                image_path = os.path.join(temp_dir, f"empty_{size}.png")
-                self.assertTrue(cv2.imwrite(image_path, image))
-
-                outputs = process_image(
-                    image_path,
-                    show_windows=False,
-                    open_folder=False,
-                )
-
-                self.assertEqual(9, len(outputs["cells"]))
-                for cell in outputs["cells"]:
-                    self.assertLessEqual(cell["mean"], 50.0)
-                    crop = load_image(
-                        os.path.join(
-                            outputs["output_dir"],
-                            f"cell_{cell['idx']:02d}.png",
-                        )
-                    )
-                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    boundary = cv2.hconcat(
-                        [
-                            gray[0:1, :],
-                            gray[-1:, :],
-                            gray[:, 0:1].T,
-                            gray[:, -1:].T,
-                        ]
-                    )
-                    self.assertLessEqual(
-                        float((boundary < 100).mean()),
-                        0.05,
-                    )
-
-    def test_rotated_low_resolution_cells_exclude_frame_bleed(self):
-        for size in (180, 200):
-            for angle in (-4.0, 3.0):
-                with (
-                    self.subTest(size=size, angle=angle),
-                    tempfile.TemporaryDirectory() as temp_dir,
-                ):
-                    image, _ = make_fixture(
-                        size=size,
-                        angle=angle,
-                        brightness=210,
-                    )
-                    image_path = os.path.join(
-                        temp_dir,
-                        f"empty_{size}_{angle:+.0f}.png",
-                    )
+    def test_pipeline_rejects_images_with_either_dimension_below_600(self):
+        images = [
+            make_fixture(size=size)[0]
+            for size in (180, 300, 599)
+        ]
+        images.append(
+            cv2.resize(make_fixture(size=800)[0], (800, 599))
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for idx, image in enumerate(images):
+                with self.subTest(shape=image.shape):
+                    image_path = os.path.join(temp_dir, f"small_{idx}.png")
                     self.assertTrue(cv2.imwrite(image_path, image))
 
-                    outputs = process_image(
-                        image_path,
-                        show_windows=False,
-                        open_folder=False,
-                    )
+                    with self.assertRaises(DetectionError) as raised:
+                        process_image(
+                            image_path,
+                            show_windows=False,
+                            open_folder=False,
+                        )
 
-                    self.assertEqual(9, len(outputs["cells"]))
-                    for cell in outputs["cells"]:
-                        self.assertLessEqual(cell["mean"], 52.0)
-                        crop = load_image(
-                            os.path.join(
-                                outputs["output_dir"],
-                                f"cell_{cell['idx']:02d}.png",
-                            )
-                        )
-                        self.assertGreater(crop.size, 0)
-                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                        boundary = cv2.hconcat(
-                            [
-                                gray[0:1, :],
-                                gray[-1:, :],
-                                gray[:, 0:1].T,
-                                gray[:, -1:].T,
-                            ]
-                        )
-                        self.assertLessEqual(
-                            float((boundary < 100).mean()),
-                            0.05,
-                        )
+                    self.assertIn("600", str(raised.exception))
+
+    def test_pipeline_accepts_600_fixture_without_frame_bias_or_overcrop(self):
+        image, expected = make_fixture(size=600, brightness=210)
+        expected_width = expected[0][2] - expected[0][0]
+        expected_height = expected[0][3] - expected[0][1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "boundary.png")
+            self.assertTrue(cv2.imwrite(image_path, image))
+
+            outputs = process_image(
+                image_path,
+                show_windows=False,
+                open_folder=False,
+            )
+
+            self.assertEqual(9, len(outputs["cells"]))
+            for cell in outputs["cells"]:
+                self.assertLessEqual(abs(cell["mean"] - 45.0), 3.0)
+                crop = load_image(
+                    os.path.join(
+                        outputs["output_dir"],
+                        f"cell_{cell['idx']:02d}.png",
+                    )
+                )
+                height, width = crop.shape[:2]
+                self.assertGreaterEqual(width / expected_width, 0.75)
+                self.assertGreaterEqual(height / expected_height, 0.75)
+                self.assertLessEqual(width / expected_width, 1.10)
+                self.assertLessEqual(height / expected_height, 1.10)
 
     def test_same_stem_different_extensions_keep_distinct_outputs(self):
         image, _ = make_fixture(filled=(1, 5, 9))

@@ -278,15 +278,41 @@ class GridDetectorTests(unittest.TestCase):
             min(square.confidence for square in detection.squares), 0.55
         )
 
-    def test_detects_valid_fixtures_near_minimum_image_size(self):
-        for size in (200, 250, 280, 300):
-            for filled in ((), (1, 2, 4, 5, 8)):
-                with self.subTest(size=size, filled=filled):
-                    image, _ = make_fixture(size=size, filled=filled)
+    def test_rejects_images_with_either_dimension_below_600(self):
+        images = [
+            make_fixture(size=size)[0]
+            for size in (180, 300, 599)
+        ]
+        images.append(
+            cv2.resize(make_fixture(size=800)[0], (800, 599))
+        )
+        for image in images:
+            with self.subTest(shape=image.shape):
+                with self.assertRaises(DetectionError) as raised:
+                    detect_inner_squares(image)
+                self.assertIn("600", str(raised.exception))
 
-                    detection = detect_inner_squares(image)
+    def test_accepts_600_fixture_with_accurate_content_geometry(self):
+        image, expected = make_fixture(size=600, brightness=210)
 
-                    self.assertEqual(9, len(detection.squares))
+        detection = detect_inner_squares(image)
+
+        self.assertEqual(9, len(detection.squares))
+        for square, truth in zip(detection.squares, expected):
+            actual = square.source_bbox
+            intersection_width = max(
+                0,
+                min(actual[2], truth[2]) - max(actual[0], truth[0]),
+            )
+            intersection_height = max(
+                0,
+                min(actual[3], truth[3]) - max(actual[1], truth[1]),
+            )
+            intersection = intersection_width * intersection_height
+            actual_area = (actual[2] - actual[0]) * (actual[3] - actual[1])
+            truth_area = (truth[2] - truth[0]) * (truth[3] - truth[1])
+            union = actual_area + truth_area - intersection
+            self.assertGreaterEqual(intersection / union, 0.75)
 
     def test_sample_content_does_not_move_inner_square_edges(self):
         for size in (900, 1200, 1400):

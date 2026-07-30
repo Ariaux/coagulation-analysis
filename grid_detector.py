@@ -526,19 +526,10 @@ def _refine_template_squares(
                     horizontal_span_end,
                     bottom_width,
                 )
-                if min(cell_x, cell_y) < 100.0:
-                    template_inset = (
-                        int(round(min(cell_x, cell_y) * 0.13)) + 2
-                    )
-                    x0 = int(round(predicted_left + template_inset))
-                    x1 = int(round(predicted_right - template_inset))
-                    y0 = int(round(predicted_top + template_inset))
-                    y1 = int(round(predicted_bottom - template_inset))
-                else:
-                    x0 = int(round(left + left_width / 2.0 + 2))
-                    x1 = int(round(right - right_width / 2.0 - 2))
-                    y0 = int(round(top + top_width / 2.0 + 2))
-                    y1 = int(round(bottom - bottom_width / 2.0 - 2))
+                x0 = int(round(left + left_width / 2.0 + 2))
+                x1 = int(round(right - right_width / 2.0 - 2))
+                y0 = int(round(top + top_width / 2.0 + 2))
+                y1 = int(round(bottom - bottom_width / 2.0 - 2))
                 edge_strengths = (
                     left_strength,
                     right_strength,
@@ -714,7 +705,7 @@ def _map_squares(
 def detect_inner_squares(
     image: np.ndarray, options: DetectorOptions | None = None
 ) -> GridDetection:
-    """Detect and number the inner content areas of a front-facing 3x3 fixture."""
+    """Detect a 3x3 fixture in a color image of at least 600x600 pixels."""
 
     if (
         image is None
@@ -723,9 +714,10 @@ def detect_inner_squares(
         or image.shape[2] != 3
     ):
         raise DetectionError("Expected a three-channel color image.")
-    if min(image.shape[:2]) < 180:
+    if min(image.shape[:2]) < 600:
         raise DetectionError(
-            "The image is too small. Use an image at least 180 pixels on each side."
+            "The image is too small for reliable analysis. "
+            "Use an image at least 600x600 pixels."
         )
     if image.dtype != np.uint8:
         raise DetectionError(
