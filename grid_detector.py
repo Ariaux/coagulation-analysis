@@ -287,6 +287,10 @@ def _refine_template_squares(
                         min(height, int((row + 0.30) * cell_y)),
                     ),
                     (
+                        max(0, int((row + 0.43) * cell_y)),
+                        min(height, int((row + 0.57) * cell_y)),
+                    ),
+                    (
                         max(0, int((row + 0.70) * cell_y)),
                         min(height, int((row + 0.80) * cell_y)),
                     ),
@@ -295,6 +299,10 @@ def _refine_template_squares(
                     (
                         max(0, int((col + 0.20) * cell_x)),
                         min(width, int((col + 0.30) * cell_x)),
+                    ),
+                    (
+                        max(0, int((col + 0.43) * cell_x)),
+                        min(width, int((col + 0.57) * cell_x)),
                     ),
                     (
                         max(0, int((col + 0.70) * cell_x)),
