@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
 
+import research.evaluate_cropping as evaluation
 from research.annotate_inner_squares import (
     save_annotations,
     validate_annotations,
@@ -83,6 +85,86 @@ class ResearchEvaluationTests(unittest.TestCase):
             summary = json.loads((output / "summary.json").read_text("utf-8"))
             self.assertIn("by_method", summary)
             self.assertIn("by_condition", summary)
+            required_metrics = {
+                "mean_iou",
+                "mean_boundary_error",
+                "cell_success_rate",
+                "all_nine_success_rate",
+                "measurement_mae",
+                "mean_runtime_ms",
+                "counts",
+            }
+            for method in ("fixed_ratio", "contour_only", "hybrid"):
+                self.assertTrue(
+                    required_metrics <= set(summary["by_method"][method])
+                )
+                baseline = summary["method_by_condition"][method]["baseline"]
+                self.assertTrue(required_metrics <= set(baseline))
+
+    def test_contour_baseline_selects_largest_qualifying_square(self):
+        smaller_closer_to_template = np.asarray(
+            [[[20, 20]], [[78, 20]], [[78, 78]], [[20, 78]]], np.int32
+        )
+        larger = np.asarray(
+            [[[10, 10]], [[80, 10]], [[80, 80]], [[10, 80]]], np.int32
+        )
+
+        selected = evaluation._choose_contour(
+            [smaller_closer_to_template, larger], cell_side=100
+        )
+
+        self.assertEqual(cv2.boundingRect(larger), selected)
+
+    def test_runtime_times_detector_only(self):
+        image, truth = make_fixture()
+        events = []
+        clock_values = iter((10.0, 11.0, 20.0, 21.0, 30.0, 31.0))
+
+        def clock():
+            events.append("clock")
+            return next(clock_values)
+
+        def detector(_image):
+            events.append("detector")
+            if events.count("detector") == 2:
+                raise evaluation.DetectionError("controlled failure")
+            return tuple(truth)
+
+        original_mean = evaluation._mean_inverted
+
+        def measured_mean(*args):
+            events.append("metric")
+            return original_mean(*args)
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.multiple(
+            evaluation,
+            fixed_ratio_detector=detector,
+            contour_only_detector=detector,
+            hybrid_detector=detector,
+            _mean_inverted=measured_mean,
+        ):
+            rows = evaluate_methods(
+                [("synthetic-001", image, tuple(truth))],
+                directory,
+                clock=clock,
+            )
+            summary = json.loads(
+                (Path(directory) / "summary.json").read_text("utf-8")
+            )
+
+        first_detector = events.index("detector")
+        self.assertEqual("clock", events[first_detector - 1])
+        self.assertEqual("clock", events[first_detector + 1])
+        self.assertEqual([1000.0, 1000.0, 1000.0], [row["runtime_ms"] for row in rows])
+        self.assertTrue(rows[1]["failed"])
+        failed_summary = summary["by_method"]["contour_only"]
+        self.assertEqual(0.0, failed_summary["mean_iou"])
+        self.assertEqual(
+            {"total": 1, "detected": 0, "failed": 1},
+            failed_summary["counts"],
+        )
+        self.assertIsNone(failed_summary["mean_boundary_error"])
+        self.assertIsNone(failed_summary["measurement_mae"])
 
 
 class AnnotationValidationTests(unittest.TestCase):
@@ -118,6 +200,13 @@ class AnnotationValidationTests(unittest.TestCase):
         out_of_order[0], out_of_order[8] = out_of_order[8], out_of_order[0]
         with self.assertRaises(ValueError):
             validate_annotations("sample.png", out_of_order)
+
+    def test_rejects_overlapping_rows_even_when_average_y_increases(self):
+        boxes = list(self.boxes)
+        boxes[2] = (210, 230, 280, 270)
+
+        with self.assertRaises(ValueError):
+            validate_annotations("sample.png", boxes)
 
 
 if __name__ == "__main__":

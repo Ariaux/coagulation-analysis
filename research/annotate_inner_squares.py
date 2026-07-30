@@ -31,8 +31,13 @@ def validate_annotations(image_name: str, boxes: Sequence[BBox]) -> dict:
         row_centers = centers[row * 3 : row * 3 + 3]
         if not (row_centers[0][0] < row_centers[1][0] < row_centers[2][0]):
             raise ValueError("Boxes must be ordered left-to-right within each row.")
-    row_y = [float(np.mean([centers[row * 3 + col][1] for col in range(3)])) for row in range(3)]
-    if not row_y[0] < row_y[1] < row_y[2]:
+    row_centers_y = [
+        [centers[row * 3 + col][1] for col in range(3)] for row in range(3)
+    ]
+    if not (
+        max(row_centers_y[0]) < min(row_centers_y[1])
+        and max(row_centers_y[1]) < min(row_centers_y[2])
+    ):
         raise ValueError("Boxes must be ordered top-to-bottom by row.")
     return {"image": image_name, "annotator": "manual", "boxes": normalized}
 

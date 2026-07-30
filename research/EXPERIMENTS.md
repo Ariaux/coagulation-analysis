@@ -102,7 +102,12 @@ python -m research.evaluate_cropping --synthetic \
 Each output directory contains:
 
 - `per_image_results.csv` — one row per case and method;
-- `summary.json` — aggregation by method and condition;
+- `summary.json` — complete metrics and counts by method, by condition, and
+  separately for every method/condition pair. IoU and success rates use all
+  rows, with detection failures contributing zero. Boundary and measurement
+  error means use successful detections because those values are undefined for
+  failures. Runtime covers every detector call, including failures, and excludes
+  metric and plotting work;
 - `method_comparison.png` — method-level IoU comparison;
 - `robustness_by_condition.png` — condition-level robustness comparison;
 - `failures/` — truth/prediction overlays for failures and incomplete

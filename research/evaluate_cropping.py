@@ -101,6 +101,30 @@ def _map_box(box: BBox, inverse: np.ndarray, shape: tuple[int, ...]) -> BBox:
     )
 
 
+def _choose_contour(
+    contours: Sequence[np.ndarray], cell_side: int
+) -> tuple[int, int, int, int] | None:
+    """Return the largest qualifying contour bbox with a stable position tie-break."""
+    candidates = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        ratio = width / max(height, 1)
+        relative = np.sqrt(width * height) / cell_side
+        if 0.8 <= ratio <= 1.25 and 0.42 <= relative <= 0.72:
+            candidates.append(
+                (
+                    float(cv2.contourArea(contour)),
+                    width * height,
+                    -y,
+                    -x,
+                    width,
+                    height,
+                    (x, y, width, height),
+                )
+            )
+    return max(candidates)[-1] if candidates else None
+
+
 def contour_only_detector(image: np.ndarray) -> tuple[BBox, ...]:
     """Find one plausible near-square dark contour independently per cell."""
     if image is None or image.ndim != 3 or min(image.shape[:2]) < 600:
@@ -120,19 +144,12 @@ def contour_only_detector(image: np.ndarray) -> tuple[BBox, ...]:
                 cell_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
             )
             cell_side = min(cell_mask.shape)
-            candidates: list[tuple[float, tuple[int, int, int, int]]] = []
-            for contour in contours:
-                x, y, candidate_width, candidate_height = cv2.boundingRect(contour)
-                ratio = candidate_width / max(candidate_height, 1)
-                relative = np.sqrt(candidate_width * candidate_height) / cell_side
-                if 0.8 <= ratio <= 1.25 and 0.42 <= relative <= 0.72:
-                    score = abs(relative - 0.58) + abs(1.0 - ratio) * 0.25
-                    candidates.append(
-                        (score, (x, y, x + candidate_width, y + candidate_height))
-                    )
-            if not candidates:
+            selected = _choose_contour(contours, cell_side)
+            if selected is None:
                 raise DetectionError(f"No plausible inner contour found in cell {len(boxes)+1}.")
-            _, (x1, y1, x2, y2) = min(candidates, key=lambda item: item[0])
+            x, y, candidate_width, candidate_height = selected
+            x1, y1 = x, y
+            x2, y2 = x + candidate_width, y + candidate_height
             safe_inset = max(3, round(cell_side * 0.043))
             rectified_box = (
                 cell_x1 + x1 + safe_inset,
@@ -279,25 +296,55 @@ def _annotate_failure(image: np.ndarray, truth: Sequence[BBox], predicted: Seque
     return annotated
 
 
+def _aggregate_group(group: Sequence[dict]) -> dict:
+    successful = [row for row in group if not row["failed"]]
+    return {
+        "mean_iou": float(np.mean([row["mean_iou"] for row in group])),
+        "mean_boundary_error": float(
+            np.mean([row["mean_boundary_error"] for row in successful])
+        )
+        if successful
+        else None,
+        "cell_success_rate": float(
+            np.mean([row["cell_success_rate"] for row in group])
+        ),
+        "all_nine_success_rate": float(
+            np.mean([row["all_nine_success"] for row in group])
+        ),
+        "measurement_mae": float(
+            np.mean([row["measurement_mae"] for row in successful])
+        )
+        if successful
+        else None,
+        "mean_runtime_ms": float(np.mean([row["runtime_ms"] for row in group])),
+        "counts": {
+            "total": len(group),
+            "detected": len(successful),
+            "failed": len(group) - len(successful),
+        },
+    }
+
+
 def _aggregate(rows: Sequence[dict], key: str) -> dict:
     groups: dict[str, list[dict]] = {}
     for row in rows:
         groups.setdefault(str(row[key]), []).append(row)
-    result = {}
-    for name, group in groups.items():
-        successful = [row for row in group if not row["failed"]]
-        result[name] = {
-            "n": len(group),
-            "detections": len(successful),
-            "mean_iou": float(np.mean([row["mean_iou"] for row in successful]))
-            if successful
-            else None,
-            "all_nine_success_rate": float(
-                np.mean([row["all_nine_success"] for row in group])
-            ),
-            "mean_runtime_ms": float(np.mean([row["runtime_ms"] for row in group])),
+    return {name: _aggregate_group(group) for name, group in groups.items()}
+
+
+def _aggregate_method_by_condition(rows: Sequence[dict]) -> dict:
+    nested: dict[str, dict[str, list[dict]]] = {}
+    for row in rows:
+        method = str(row["method"])
+        condition = str(row["condition"])
+        nested.setdefault(method, {}).setdefault(condition, []).append(row)
+    return {
+        method: {
+            condition: _aggregate_group(group)
+            for condition, group in conditions.items()
         }
-    return result
+        for method, conditions in nested.items()
+    }
 
 
 def _write_plots(rows: Sequence[dict], output_dir: Path) -> None:
@@ -343,6 +390,7 @@ def evaluate_methods(
     cases: Iterable[EvaluationCase | tuple[str, np.ndarray, Sequence[BBox]]],
     output_dir: str | Path,
     ablations: bool = False,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> list[dict]:
     """Evaluate methods, write tabular results, plots, and failure overlays."""
     output = Path(output_dir)
@@ -382,28 +430,46 @@ def evaluate_methods(
         case = _normalise_case(case_item)
         truth_means = [_mean_inverted(case.image, box) for box in case.truth]
         for method_name, detector in methods:
-            start = time.perf_counter()
             predicted: tuple[BBox, ...] = ()
             error = ""
+            start = clock()
             try:
                 predicted = detector(case.image)
-                if len(predicted) != 9:
-                    raise DetectionError("Detector did not return exactly nine boxes.")
-                ious = [box_iou(truth, found) for truth, found in zip(case.truth, predicted)]
-                errors = [
-                    boundary_error(truth, found)
-                    for truth, found in zip(case.truth, predicted)
-                ]
-                predicted_means = [_mean_inverted(case.image, box) for box in predicted]
-                measurement_error = float(
-                    np.mean(np.abs(np.asarray(truth_means) - np.asarray(predicted_means)))
-                )
             except DetectionError as exception:
+                runtime_ms = (clock() - start) * 1000.0
                 error = str(exception)
                 ious = []
                 errors = []
                 measurement_error = float("nan")
-            runtime_ms = (time.perf_counter() - start) * 1000.0
+            else:
+                runtime_ms = (clock() - start) * 1000.0
+                try:
+                    if len(predicted) != 9:
+                        raise DetectionError("Detector did not return exactly nine boxes.")
+                    ious = [
+                        box_iou(truth, found)
+                        for truth, found in zip(case.truth, predicted)
+                    ]
+                    errors = [
+                        boundary_error(truth, found)
+                        for truth, found in zip(case.truth, predicted)
+                    ]
+                    predicted_means = [
+                        _mean_inverted(case.image, box) for box in predicted
+                    ]
+                    measurement_error = float(
+                        np.mean(
+                            np.abs(
+                                np.asarray(truth_means)
+                                - np.asarray(predicted_means)
+                            )
+                        )
+                    )
+                except DetectionError as exception:
+                    error = str(exception)
+                    ious = []
+                    errors = []
+                    measurement_error = float("nan")
             cell_success = sum(iou >= 0.85 for iou in ious)
             all_nine = cell_success == 9
             row = {
@@ -433,8 +499,14 @@ def evaluate_methods(
         writer.writerows(rows)
     summary = {
         "thresholds": {"cell_success_iou": 0.85, "all_nine_cells_required": 9},
+        "aggregation_semantics": {
+            "accuracy_rates": "All rows; detection failures contribute zero.",
+            "boundary_and_measurement": "Successful detections only; null when none.",
+            "runtime": "All detector calls, including failures; detector call only.",
+        },
         "by_method": _aggregate(rows, "method"),
         "by_condition": _aggregate(rows, "condition"),
+        "method_by_condition": _aggregate_method_by_condition(rows),
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
