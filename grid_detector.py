@@ -54,6 +54,10 @@ class _Candidate:
 
 
 _MIN_EDGE_CONTRAST = 0.10
+_INCOMPLETE_FIXTURE_MESSAGE = (
+    "Could not detect a complete 3x3 fixture. Keep the full grid in frame "
+    "and photograph it straight on."
+)
 
 
 def _order_quad(points: np.ndarray) -> np.ndarray:
@@ -92,13 +96,10 @@ def _find_outer_quad(image: np.ndarray) -> np.ndarray:
     candidates = [
         contour
         for contour in contours
-        if 0.20 <= cv2.contourArea(contour) / image_area <= 0.95
+        if 0.15 <= cv2.contourArea(contour) / image_area <= 0.95
     ]
     if not candidates:
-        raise DetectionError(
-            "Could not find the outer fixture. Use a front-facing photo with "
-            "the complete dark frame visible."
-        )
+        raise DetectionError(_INCOMPLETE_FIXTURE_MESSAGE)
 
     contour = max(candidates, key=cv2.contourArea)
     return _order_quad(cv2.boxPoints(cv2.minAreaRect(contour)))
@@ -133,35 +134,128 @@ def _rectify(
     return rectified, forward, inverse
 
 
-def _ridge(
+def _edge_profile(
     darkness: np.ndarray,
+    dark_mask: np.ndarray,
     expected: float,
     radius: int,
     axis: int,
-    band_start: int,
-    band_end: int,
-) -> tuple[float, float, float]:
+    pieces: tuple[tuple[int, int], ...],
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     limit = darkness.shape[1] if axis == 0 else darkness.shape[0]
     low = max(0, int(round(expected)) - radius)
     high = min(limit - 1, int(round(expected)) + radius)
-    if axis == 0:
-        projection = darkness[band_start:band_end, low : high + 1].mean(axis=0)
-    else:
-        projection = darkness[low : high + 1, band_start:band_end].mean(axis=1)
+    piece_profiles = []
+    piece_dark_fractions = []
+    piece_darkness = []
+    for start, end in pieces:
+        if end <= start:
+            continue
+        if axis == 0:
+            edge_samples = darkness[start:end, low : high + 1]
+            mask_samples = dark_mask[start:end, low : high + 1]
+        else:
+            edge_samples = darkness[low : high + 1, start:end].T
+            mask_samples = dark_mask[low : high + 1, start:end].T
+        dark_fraction = mask_samples.mean(axis=0)
+        gradient = np.abs(np.gradient(edge_samples, axis=1)).mean(axis=0)
+        gradient_scale = float(np.percentile(gradient, 95))
+        if gradient_scale > 1e-6:
+            normalized_gradient = np.clip(gradient / gradient_scale, 0.0, 1.0)
+        else:
+            normalized_gradient = np.zeros_like(gradient)
+        piece_dark_fractions.append(dark_fraction)
+        mean_darkness = edge_samples.mean(axis=0)
+        piece_darkness.append(mean_darkness)
+        piece_profiles.append(
+            0.47 * dark_fraction
+            + 0.50 * mean_darkness
+            + 0.03 * normalized_gradient
+        )
+    if not piece_profiles:
+        empty = np.zeros((1, high - low + 1))
+        return low, empty[0], empty[0], empty, empty
+
+    profile_matrix = np.stack(piece_profiles)
+    dark_fraction_matrix = np.stack(piece_dark_fractions)
+    darkness_matrix = np.stack(piece_darkness)
+    return (
+        low,
+        profile_matrix.mean(axis=0),
+        darkness_matrix.mean(axis=0),
+        profile_matrix,
+        dark_fraction_matrix,
+    )
+
+
+def _ridge(
+    darkness: np.ndarray,
+    dark_mask: np.ndarray,
+    expected: float,
+    radius: int,
+    axis: int,
+    pieces: tuple[tuple[int, int], ...],
+) -> tuple[float, float, float]:
+    (
+        low,
+        projection,
+        width_projection,
+        piece_profiles,
+        piece_dark_fractions,
+    ) = _edge_profile(
+        darkness, dark_mask, expected, radius, axis, pieces
+    )
+    if projection.size == 0:
+        return expected, 1.0, 0.0
     peak_offset = int(np.argmax(projection))
-    peak = float(projection[peak_offset])
-    baseline = float(projection.min())
-    threshold = baseline + (peak - baseline) * 0.55
+    width_peak = float(width_projection[peak_offset])
+    width_baseline = float(width_projection.min())
+    threshold = width_baseline + (width_peak - width_baseline) * 0.75
     left = peak_offset
     right = peak_offset
-    while left > 0 and projection[left - 1] >= threshold:
+    while left > 0 and width_projection[left - 1] >= threshold:
         left -= 1
-    while right + 1 < projection.size and projection[right + 1] >= threshold:
+    while (
+        right + 1 < width_projection.size
+        and width_projection[right + 1] >= threshold
+    ):
         right += 1
     center = low + (left + right) / 2.0
     thickness = float(right - left + 1)
-    strength = float(np.clip(peak - baseline, 0.0, 1.0))
+    piece_strengths = (
+        0.75
+        * (
+            piece_dark_fractions[:, peak_offset]
+            - piece_dark_fractions.min(axis=1)
+        )
+        + 0.25
+        * (
+            piece_profiles[:, peak_offset]
+            - piece_profiles.min(axis=1)
+        )
+    )
+    strength = float(np.clip(np.min(piece_strengths), 0.0, 1.0))
     return center, thickness, strength
+
+
+def _validate_fixture_structure(rectified: np.ndarray) -> None:
+    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
+    _, dark = cv2.threshold(
+        gray, 0, 1, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+    )
+
+    for projection in (dark.mean(axis=0), dark.mean(axis=1)):
+        length = projection.size
+        expected_dividers = (0.0, length / 3.0, 2.0 * length / 3.0, length - 1.0)
+        radius = max(2, int(round(length * 0.035)))
+        baseline = float(np.percentile(projection, 30))
+        for expected in expected_dividers:
+            center = int(round(expected))
+            start = max(0, center - radius)
+            end = min(length, center + radius + 1)
+            peak = float(np.max(projection[start:end]))
+            if peak < 0.55 or peak - baseline < 0.25:
+                raise DetectionError(_INCOMPLETE_FIXTURE_MESSAGE)
 
 
 def _refine_template_squares(
@@ -169,6 +263,9 @@ def _refine_template_squares(
 ) -> list[_Candidate]:
     gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
     darkness = 1.0 - gray.astype(np.float32) / 255.0
+    _, dark_mask = cv2.threshold(
+        gray, 0, 1, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+    )
     height, width = gray.shape
     cell_x = width / 3.0
     cell_y = height / 3.0
@@ -184,41 +281,57 @@ def _refine_template_squares(
             predicted_bottom = (row + 0.78) * cell_y
 
             if enabled:
-                vertical_start = max(0, int((row + 0.30) * cell_y))
-                vertical_end = min(height, int((row + 0.70) * cell_y))
-                horizontal_start = max(0, int((col + 0.30) * cell_x))
-                horizontal_end = min(width, int((col + 0.70) * cell_x))
+                vertical_pieces = (
+                    (
+                        max(0, int((row + 0.20) * cell_y)),
+                        min(height, int((row + 0.30) * cell_y)),
+                    ),
+                    (
+                        max(0, int((row + 0.70) * cell_y)),
+                        min(height, int((row + 0.80) * cell_y)),
+                    ),
+                )
+                horizontal_pieces = (
+                    (
+                        max(0, int((col + 0.20) * cell_x)),
+                        min(width, int((col + 0.30) * cell_x)),
+                    ),
+                    (
+                        max(0, int((col + 0.70) * cell_x)),
+                        min(width, int((col + 0.80) * cell_x)),
+                    ),
+                )
                 left, left_width, left_strength = _ridge(
                     darkness,
+                    dark_mask,
                     predicted_left,
                     radius_x,
                     0,
-                    vertical_start,
-                    vertical_end,
+                    vertical_pieces,
                 )
                 right, right_width, right_strength = _ridge(
                     darkness,
+                    dark_mask,
                     predicted_right,
                     radius_x,
                     0,
-                    vertical_start,
-                    vertical_end,
+                    vertical_pieces,
                 )
                 top, top_width, top_strength = _ridge(
                     darkness,
+                    dark_mask,
                     predicted_top,
                     radius_y,
                     1,
-                    horizontal_start,
-                    horizontal_end,
+                    horizontal_pieces,
                 )
                 bottom, bottom_width, bottom_strength = _ridge(
                     darkness,
+                    dark_mask,
                     predicted_bottom,
                     radius_y,
                     1,
-                    horizontal_start,
-                    horizontal_end,
+                    horizontal_pieces,
                 )
                 x0 = int(round(left + left_width / 2.0 + 2))
                 x1 = int(round(right - right_width / 2.0 - 2))
@@ -392,6 +505,11 @@ def detect_inner_squares(
     options = options or DetectorOptions()
     outer_quad = _find_outer_quad(image)
     rectified, forward, inverse = _rectify(image, outer_quad, options.rectify)
+    if options.rectify:
+        structure_image = rectified
+    else:
+        structure_image, _, _ = _rectify(image, outer_quad, True)
+    _validate_fixture_structure(structure_image)
     raw = _refine_template_squares(rectified, options.refine_edges)
     candidates = _validate_grid(raw, rectified.shape, options.validate_grid)
     squares = _map_squares(candidates, inverse, image.shape)

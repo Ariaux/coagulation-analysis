@@ -163,6 +163,65 @@ class GridDetectorTests(unittest.TestCase):
             min(square.confidence for square in detection.squares), 0.55
         )
 
+    def test_sample_content_does_not_move_inner_square_edges(self):
+        empty, _ = make_fixture()
+        filled, _ = make_fixture(filled=(1, 2, 4, 5, 8))
+
+        empty_detection = detect_inner_squares(empty)
+        filled_detection = detect_inner_squares(filled)
+
+        for empty_square, filled_square in zip(
+            empty_detection.squares, filled_detection.squares
+        ):
+            coordinate_delta = max(
+                abs(empty_coordinate - filled_coordinate)
+                for empty_coordinate, filled_coordinate in zip(
+                    empty_square.source_bbox, filled_square.source_bbox
+                )
+            )
+            self.assertLessEqual(coordinate_delta, 5)
+
+    def test_tolerates_small_rotations_and_brightness_changes(self):
+        for angle in (-4.0, 3.0):
+            for brightness in (165, 235):
+                with self.subTest(angle=angle, brightness=brightness):
+                    image, _ = make_fixture(
+                        angle=angle,
+                        brightness=brightness,
+                        filled=(1, 2, 4, 5, 8),
+                    )
+
+                    detection = detect_inner_squares(image)
+
+                    self.assertEqual(9, len(detection.squares))
+                    self.assertGreaterEqual(detection.confidence, 0.55)
+
+    def test_rejects_image_without_complete_fixture(self):
+        image = np.full((900, 900, 3), 235, dtype=np.uint8)
+        cv2.rectangle(image, (50, 50), (430, 430), (25, 25, 25), 10)
+
+        with self.assertRaises(DetectionError) as raised:
+            detect_inner_squares(image)
+        self.assertEqual(
+            "Could not detect a complete 3x3 fixture. Keep the full grid in "
+            "frame and photograph it straight on.",
+            str(raised.exception),
+        )
+
+    def test_structure_validation_uses_rectified_fixture_coordinates(self):
+        image, _ = make_fixture(angle=-4.0, filled=(1, 2, 4, 5, 8))
+
+        detection = detect_inner_squares(
+            image,
+            DetectorOptions(
+                rectify=False,
+                refine_edges=False,
+                validate_grid=False,
+            ),
+        )
+
+        self.assertEqual(9, len(detection.squares))
+
     def test_rejects_solid_dark_area_without_inner_edge_structure(self):
         size = 900
         image = np.full((size, size, 3), 210, dtype=np.uint8)
