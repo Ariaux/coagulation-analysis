@@ -24,13 +24,23 @@ from grid_detector import DetectionError, GridDetection, detect_inner_squares
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "Desktop", "coagulation_log.txt")
 
+
+def _print_console(message, file=None):
+    stream = file if file is not None else sys.stdout
+    text = str(message)
+    encoding = getattr(stream, "encoding", None)
+    if encoding:
+        text = text.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(text, file=stream)
+
+
 def log(msg):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"{msg}\n")
     except OSError as exception:
-        print(f"Log file unavailable: {exception}", file=sys.stderr)
-    print(msg)
+        _print_console(f"Log file unavailable: {exception}", file=sys.stderr)
+    _print_console(msg)
 
 
 def to_8bit(bgr):

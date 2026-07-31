@@ -78,6 +78,22 @@ class StandalonePipelineTests(unittest.TestCase):
         self.assertIn("Log file unavailable", stderr.getvalue())
         self.assertIn("read-only", stderr.getvalue())
 
+    def test_log_handles_paths_the_console_encoding_cannot_represent(self):
+        console_bytes = io.BytesIO()
+        console = io.TextIOWrapper(console_bytes, encoding="ascii", errors="strict")
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            app_standalone,
+            "LOG_FILE",
+            os.path.join(temp_dir, "audit.log"),
+        ), mock.patch.object(app_standalone.sys, "stdout", console):
+            app_standalone.log("Output: 中文结果\\样本图片.png")
+            console.flush()
+
+        rendered = console_bytes.getvalue().decode("ascii")
+        self.assertIn(r"\u4e2d\u6587", rendered)
+        self.assertIn("sample", rendered.replace(r"\u6837\u672c", "sample"))
+
     def test_write_failure_does_not_publish_partial_output(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
