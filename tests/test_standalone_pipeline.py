@@ -341,7 +341,10 @@ class StandalonePipelineTests(unittest.TestCase):
             unicode_dir = os.path.join(temp_dir, "中文结果")
             os.makedirs(unicode_dir)
             image_path = os.path.join(unicode_dir, "样本图片.png")
-            self.assertTrue(cv2.imwrite(image_path, image))
+            encoded_ok, encoded_image = cv2.imencode(".png", image)
+            self.assertTrue(encoded_ok)
+            with open(image_path, "wb") as image_file:
+                image_file.write(encoded_image.tobytes())
 
             with mock.patch.object(
                 app_standalone.cv2,
