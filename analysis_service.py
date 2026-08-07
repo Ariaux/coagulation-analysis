@@ -13,7 +13,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import cv2
 import numpy as np
@@ -398,13 +398,18 @@ def _atomic_publish(
     final_zip: Path,
 ) -> None:
     token = uuid.uuid4().hex
-    backup_dir = final_dir.with_name(f".{final_dir.name}.previous-{token}")
-    backup_zip = final_zip.with_name(f".{final_zip.name}.previous-{token}")
+    backup_root = final_dir.parent / f".analysis.previous-{token}"
+    backup_dir = backup_root / "output"
+    backup_zip = backup_root / "archive.zip"
+    backup_root_created = False
     backed_up_dir = False
     backed_up_zip = False
     published_dir = False
     published_zip = False
     try:
+        if final_dir.exists() or final_zip.exists():
+            backup_root.mkdir()
+            backup_root_created = True
         if final_dir.exists():
             os.replace(final_dir, backup_dir)
             backed_up_dir = True
@@ -415,21 +420,45 @@ def _atomic_publish(
         published_dir = True
         os.replace(staging_zip, final_zip)
         published_zip = True
-    except Exception:
+        if backup_root_created:
+            _remove_known_directory(backup_root)
+    except Exception as original_exception:
+        rollback_errors: list[tuple[str, Exception]] = []
+
+        def attempt_rollback(label: str, operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except Exception as rollback_exception:
+                rollback_errors.append((label, rollback_exception))
+
         if published_zip:
-            _remove_known_file(final_zip)
+            attempt_rollback(
+                "move the new ZIP back to staging",
+                lambda: os.replace(final_zip, staging_zip),
+            )
         if published_dir:
-            _remove_known_directory(final_dir)
+            attempt_rollback(
+                "move the new output directory back to staging",
+                lambda: os.replace(final_dir, staging_dir),
+            )
         if backed_up_dir:
-            os.replace(backup_dir, final_dir)
+            attempt_rollback(
+                "restore the previous output directory",
+                lambda: os.replace(backup_dir, final_dir),
+            )
         if backed_up_zip:
-            os.replace(backup_zip, final_zip)
+            attempt_rollback(
+                "restore the previous ZIP",
+                lambda: os.replace(backup_zip, final_zip),
+            )
+        if backup_root_created and backup_root.exists():
+            attempt_rollback(
+                "remove the empty transaction directory",
+                backup_root.rmdir,
+            )
+        for label, rollback_exception in rollback_errors:
+            original_exception.add_note(f"Could not {label}: {rollback_exception}")
         raise
-    else:
-        if backed_up_dir:
-            _remove_known_directory(backup_dir)
-        if backed_up_zip:
-            _remove_known_file(backup_zip)
 
 
 def _publish_analysis(
@@ -510,9 +539,17 @@ def _publish_analysis(
         )
         _create_zip(staging_dir, staging_zip)
         _atomic_publish(staging_dir, staging_zip, final_dir, final_zip)
-    except Exception:
-        _remove_known_directory(staging_dir)
-        _remove_known_file(staging_zip)
+    except Exception as original_exception:
+        for label, path, cleanup in (
+            ("staging directory", staging_dir, _remove_known_directory),
+            ("staging ZIP", staging_zip, _remove_known_file),
+        ):
+            try:
+                cleanup(path)
+            except Exception as cleanup_exception:
+                original_exception.add_note(
+                    f"Could not remove {label} {path}: {cleanup_exception}"
+                )
         raise
 
     outer_quad = np.rint(detection.outer_quad).astype(int).tolist()

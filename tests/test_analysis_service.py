@@ -2,10 +2,13 @@ import csv
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest import mock
 
 import cv2
 
+import analysis_service
 import grid_detector
 from analysis_service import (
     DEEP_RED_RGB,
@@ -65,6 +68,64 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertEqual(9, len(rows))
             self.assertIn("final_x1", rows[0])
             self.assertEqual("5.0", rows[0]["inset_percent"])
+
+    def test_backup_cleanup_failure_restores_the_prior_complete_result(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            prior = analyze_image(
+                source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            prior_crop = cv2.imread(prior["crop_paths"][0])
+            self.assertIsNotNone(prior_crop)
+
+            real_remove_directory = analysis_service._remove_known_directory
+
+            def fail_previous_directory_cleanup(path):
+                if ".previous-" in Path(path).name:
+                    raise OSError("simulated backup cleanup failure")
+                return real_remove_directory(path)
+
+            with mock.patch.object(
+                analysis_service,
+                "_remove_known_directory",
+                side_effect=fail_previous_directory_cleanup,
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated backup cleanup failure"
+                ):
+                    analyze_image(
+                        source,
+                        AnalysisSettings(10.0, 60.0, results_root),
+                    )
+
+            with Path(prior["json_path"]).open(encoding="utf-8") as results_file:
+                metadata = json.load(results_file)
+            self.assertEqual(5.0, metadata["settings"]["inset_percent"])
+            restored_crop = cv2.imread(prior["crop_paths"][0])
+            self.assertIsNotNone(restored_crop)
+            self.assertEqual(prior_crop.shape, restored_crop.shape)
+            with zipfile.ZipFile(prior["zip_path"]) as archive:
+                json_name = next(
+                    name
+                    for name in archive.namelist()
+                    if name.endswith("_results.json")
+                )
+                archived_metadata = json.loads(archive.read(json_name))
+            self.assertEqual(
+                5.0,
+                archived_metadata["settings"]["inset_percent"],
+            )
+            self.assertFalse(
+                any(
+                    ".previous-" in path.name or "_staging_" in path.name
+                    for path in results_root.iterdir()
+                )
+            )
 
 
 class AnalysisSettingsTests(unittest.TestCase):
