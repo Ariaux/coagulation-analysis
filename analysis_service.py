@@ -420,8 +420,6 @@ def _atomic_publish(
         published_dir = True
         os.replace(staging_zip, final_zip)
         published_zip = True
-        if backup_root_created:
-            _remove_known_directory(backup_root)
     except Exception as original_exception:
         rollback_errors: list[tuple[str, Exception]] = []
 
@@ -459,6 +457,17 @@ def _atomic_publish(
         for label, rollback_exception in rollback_errors:
             original_exception.add_note(f"Could not {label}: {rollback_exception}")
         raise
+
+    # Both new artifacts are now the complete publication. Deleting the only
+    # prior copy is the irrevocable commit point, so cleanup after this point is
+    # best-effort and must never trigger rollback of the new result. Any remnant
+    # is confined to this uniquely named transaction directory and can be
+    # removed safely by a later cleanup attempt.
+    if backup_root_created:
+        try:
+            _remove_known_directory(backup_root)
+        except Exception:
+            pass
 
 
 def _publish_analysis(

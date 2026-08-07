@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -69,7 +70,7 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertIn("final_x1", rows[0])
             self.assertEqual("5.0", rows[0]["inset_percent"])
 
-    def test_backup_cleanup_failure_restores_the_prior_complete_result(self):
+    def test_precommit_zip_publish_failure_restores_the_prior_complete_result(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -83,20 +84,26 @@ class SingleImageServiceTests(unittest.TestCase):
             prior_crop = cv2.imread(prior["crop_paths"][0])
             self.assertIsNotNone(prior_crop)
 
-            real_remove_directory = analysis_service._remove_known_directory
+            real_replace = analysis_service.os.replace
 
-            def fail_previous_directory_cleanup(path):
-                if ".previous-" in Path(path).name:
-                    raise OSError("simulated backup cleanup failure")
-                return real_remove_directory(path)
+            def fail_staging_zip_publish(source_path, destination_path):
+                source_path = Path(source_path)
+                destination_path = Path(destination_path)
+                if (
+                    "_staging_" in source_path.name
+                    and source_path.suffix == ".zip"
+                    and destination_path == Path(prior["zip_path"])
+                ):
+                    raise OSError("simulated precommit ZIP publish failure")
+                return real_replace(source_path, destination_path)
 
             with mock.patch.object(
-                analysis_service,
-                "_remove_known_directory",
-                side_effect=fail_previous_directory_cleanup,
+                analysis_service.os,
+                "replace",
+                side_effect=fail_staging_zip_publish,
             ):
                 with self.assertRaisesRegex(
-                    OSError, "simulated backup cleanup failure"
+                    OSError, "simulated precommit ZIP publish failure"
                 ):
                     analyze_image(
                         source,
@@ -123,6 +130,76 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertFalse(
                 any(
                     ".previous-" in path.name or "_staging_" in path.name
+                    for path in results_root.iterdir()
+                )
+            )
+
+    def test_partial_postcommit_cleanup_failure_keeps_new_result_complete(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            prior = analyze_image(
+                source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            prior_crop = cv2.imread(prior["crop_paths"][0])
+            self.assertIsNotNone(prior_crop)
+
+            real_remove_directory = analysis_service._remove_known_directory
+
+            def partially_remove_previous_result(path):
+                path = Path(path)
+                if ".previous-" in path.name:
+                    shutil.rmtree(path / "output")
+                    raise OSError("simulated partial postcommit cleanup failure")
+                return real_remove_directory(path)
+
+            with mock.patch.object(
+                analysis_service,
+                "_remove_known_directory",
+                side_effect=partially_remove_previous_result,
+            ):
+                result = analyze_image(
+                    source,
+                    AnalysisSettings(10.0, 60.0, results_root),
+                )
+
+            with Path(result["json_path"]).open(encoding="utf-8") as results_file:
+                metadata = json.load(results_file)
+            self.assertEqual(10.0, metadata["settings"]["inset_percent"])
+            new_crop = cv2.imread(result["crop_paths"][0])
+            self.assertIsNotNone(new_crop)
+            self.assertLess(new_crop.shape[0], prior_crop.shape[0])
+            self.assertLess(new_crop.shape[1], prior_crop.shape[1])
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                names = archive.namelist()
+                json_name = next(
+                    name for name in names if name.endswith("_results.json")
+                )
+                archived_metadata = json.loads(archive.read(json_name))
+            self.assertEqual(13, len(names))
+            self.assertEqual(
+                10.0,
+                archived_metadata["settings"]["inset_percent"],
+            )
+            self.assertFalse(
+                any("_staging_" in path.name for path in results_root.iterdir())
+            )
+
+            transactions = [
+                path
+                for path in results_root.iterdir()
+                if path.name.startswith(".analysis.previous-")
+            ]
+            self.assertEqual(1, len(transactions))
+            for transaction in transactions:
+                real_remove_directory(transaction)
+            self.assertFalse(
+                any(
+                    path.name.startswith(".analysis.previous-")
                     for path in results_root.iterdir()
                 )
             )
