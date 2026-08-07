@@ -9,6 +9,7 @@ from unittest import mock
 import cv2
 import numpy as np
 
+import analysis_service
 import batch_service
 from analysis_service import AnalysisSettings
 from batch_service import analyze_batch
@@ -365,6 +366,56 @@ class BatchServiceTests(unittest.TestCase):
                         contents = archive.read(name).decode("utf-8")
                         self.assertNotIn(staging_prefix, contents)
                         self.assertNotIn("_staging_", contents)
+
+    def test_real_publisher_failure_hides_nested_image_staging_directory(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            attempted_paths = []
+            self.assertTrue(cv2.imwrite(str(source), image))
+
+            def fail_image_write(path, _image):
+                attempted_paths.append(str(path))
+                return False
+
+            with mock.patch.object(
+                analysis_service,
+                "_write_image",
+                side_effect=fail_image_write,
+            ):
+                result = analyze_batch(
+                    [source],
+                    AnalysisSettings(results_root=results_root),
+                )
+
+            nested_staging_dir = str(Path(attempted_paths[0]).parent)
+            nested_staging_name = Path(nested_staging_dir).name
+            reason = result["failures"][0]["reason"]
+            self.assertIn("Could not write crop", reason)
+            self.assertIn("<image>", reason)
+            self.assertIn("cell_01.png", reason)
+
+            report_paths = [
+                Path(result["summary_csv"]),
+                Path(result["failures_csv"]),
+                Path(result["batch_dir"]) / "batch-metadata.json",
+            ]
+            published_text = [
+                reason,
+                *(path.read_text(encoding="utf-8") for path in report_paths),
+            ]
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                for name in archive.namelist():
+                    self.assertNotIn("_staging_", name)
+                    if name.endswith((".csv", ".json")):
+                        published_text.append(archive.read(name).decode("utf-8"))
+
+            for contents in published_text:
+                self.assertNotIn(nested_staging_dir, contents)
+                self.assertNotIn(nested_staging_name, contents)
+                self.assertNotIn("_staging_", contents)
 
 
 if __name__ == "__main__":

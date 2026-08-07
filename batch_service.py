@@ -7,6 +7,7 @@ import ctypes
 import errno
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -26,6 +27,10 @@ _BATCH_PUBLICATION_LOCKS_GUARD = threading.Lock()
 _DARWIN_RENAME_EXCL = 0x00000004
 _LINUX_AT_FDCWD = -100
 _LINUX_RENAME_NOREPLACE = 1
+_OWNED_NESTED_STAGING_COMPONENT = re.compile(
+    r"(\.[/\\])\.[\w-]+_staging_[A-Za-z0-9_-]+(?:\.zip)?"
+    r"(?=[/\\\s'\":),;\]]|$)"
+)
 
 
 def _new_batch_name() -> str:
@@ -120,7 +125,11 @@ def _portable_failure_reason(exception: Exception, staging_dir: Path) -> str:
         reverse=True,
     ):
         reason = reason.replace(staging_prefix, ".")
-    return reason.replace(staging_dir.name, "<batch>")
+    reason = reason.replace(staging_dir.name, "<batch>")
+    return _OWNED_NESTED_STAGING_COMPONENT.sub(
+        lambda match: f"{match.group(1)}<image>",
+        reason,
+    )
 
 
 def _commit_batch_without_overwrite(
