@@ -146,14 +146,35 @@ def _audit_log_directories() -> list[Path]:
 
 
 def _outside_served_root(directory: Path, results_root: str | Path | None) -> bool:
-    if results_root is None:
-        return True
     try:
-        served_root = Path(results_root).expanduser().resolve()
-        audit_directory = directory.expanduser().resolve()
+        raw_audit_directory = Path(
+            os.path.abspath(directory.expanduser())
+        )
+        audit_directory = raw_audit_directory.resolve()
     except (OSError, RuntimeError, ValueError):
         return False
-    return not audit_directory.is_relative_to(served_root)
+    if results_root is None:
+        return True
+
+    try:
+        raw_served_root = Path(
+            os.path.abspath(Path(results_root).expanduser())
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if raw_audit_directory.is_relative_to(
+        raw_served_root
+    ) or audit_directory.is_relative_to(raw_served_root):
+        return False
+
+    try:
+        served_root = raw_served_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return not (
+        raw_audit_directory.is_relative_to(served_root)
+        or audit_directory.is_relative_to(served_root)
+    )
 
 
 def _write_startup_audit(
@@ -264,9 +285,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             not arguments.no_browser,
         )
     except Exception as exception:
-        _print_console(f"Website startup failed: {exception}")
         try:
             _write_startup_audit(exception, audit_results_root)
+        except Exception:
+            pass
+        try:
+            _print_console(f"Website startup failed: {exception}")
         except Exception:
             pass
         return 1

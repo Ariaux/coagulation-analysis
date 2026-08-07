@@ -24,6 +24,16 @@ def fake_application(local_url="http://127.0.0.1:7860/"):
     return application
 
 
+class BrokenConsole:
+    encoding = "utf-8"
+
+    def write(self, _text):
+        raise OSError("stdout closed")
+
+    def flush(self):
+        raise OSError("stdout closed")
+
+
 class WebLauncherPathTests(unittest.TestCase):
     def test_default_results_root_is_beside_packaged_launcher(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -461,6 +471,31 @@ class WebLauncherAuditTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertIn("read-only results", content)
 
+    def test_self_linked_results_root_still_writes_external_utf8_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            results_root = base / "自引用-results"
+            try:
+                results_root.symlink_to(results_root, target_is_directory=True)
+            except OSError as exception:
+                self.skipTest(f"Symlinks unavailable: {exception}")
+            audit_dir = base / "private-logs"
+            with mock.patch.object(
+                web_launcher,
+                "_audit_log_directories",
+                return_value=[audit_dir],
+            ), mock.patch.object(web_launcher, "_print_console"):
+                exit_code = web_launcher.main(
+                    ["--results-root", str(results_root), "--no-browser"]
+                )
+
+            log_path = audit_dir / "website-startup.log"
+            content = log_path.read_bytes().decode("utf-8")
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("symlink, junction, or reparse point", content)
+        self.assertFalse(log_path.is_relative_to(results_root))
+
 
 class WebLauncherMainTests(unittest.TestCase):
     def test_main_forwards_switches_and_returns_zero(self):
@@ -551,6 +586,33 @@ class WebLauncherMainTests(unittest.TestCase):
         print_console.assert_called_once_with(
             "Website startup failed: server unavailable"
         )
+
+    def test_broken_stdout_does_not_suppress_original_audit_or_return_code(self):
+        original_exception = RuntimeError("原始启动错误")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audit_dir = Path(temp_dir) / "private-logs"
+            with mock.patch.object(
+                web_launcher,
+                "launch_site",
+                side_effect=original_exception,
+            ), mock.patch.object(
+                web_launcher,
+                "_audit_log_directories",
+                return_value=[audit_dir],
+            ), mock.patch.object(
+                web_launcher.sys,
+                "stdout",
+                BrokenConsole(),
+            ):
+                exit_code = web_launcher.main(["--no-browser"])
+
+            content = (audit_dir / "website-startup.log").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("原始启动错误", content)
+        self.assertNotIn("stdout closed", content)
 
     def test_default_results_path_failure_is_contained(self):
         exception = OSError("launcher path unavailable")
