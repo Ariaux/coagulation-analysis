@@ -4,16 +4,22 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
 
+import batch_service
 from analysis_service import AnalysisSettings
 from batch_service import analyze_batch
 from tests.test_grid_detector import make_fixture
 
 
 class BatchServiceTests(unittest.TestCase):
+    def assert_results_root_is_empty(self, results_root):
+        self.assertTrue(results_root.is_dir())
+        self.assertEqual([], list(results_root.iterdir()))
+
     def test_batch_continues_after_failure_and_archives_reports(self):
         good, _ = make_fixture(filled=(1, 5, 9))
         bad = np.full((900, 900, 3), 255, dtype=np.uint8)
@@ -68,6 +74,35 @@ class BatchServiceTests(unittest.TestCase):
             self.assertTrue(any(name.endswith("_analysis.zip") for name in names))
             self.assertNotIn("batch-results.zip", names)
             self.assertTrue(all(not name.startswith("/") for name in names))
+            self.assertTrue(all("_staging_" not in name for name in names))
+
+            success = result["successes"][0]
+            returned_paths = [
+                result["batch_dir"],
+                result["summary_csv"],
+                result["failures_csv"],
+                result["zip_path"],
+                success["output_dir"],
+                success["overlay_path"],
+                success["heatmap_path"],
+                success["csv_path"],
+                success["json_path"],
+                success["zip_path"],
+                *success["crop_paths"],
+                *(cell["crop_path"] for cell in success["cells"]),
+            ]
+            for returned_path in returned_paths:
+                with self.subTest(returned_path=returned_path):
+                    self.assertTrue(Path(returned_path).exists())
+                    self.assertNotIn("_staging_", returned_path)
+            self.assertNotIn(
+                "_staging_",
+                Path(success["json_path"]).read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(
+                "_staging_",
+                Path(success["csv_path"]).read_text(encoding="utf-8"),
+            )
 
     def test_duplicate_unicode_sources_keep_distinct_results_in_archive(self):
         image, _ = make_fixture(filled=(1, 5, 9))
@@ -77,8 +112,10 @@ class BatchServiceTests(unittest.TestCase):
             second = root / "病例乙" / "sample.png"
             first.parent.mkdir()
             second.parent.mkdir()
-            self.assertTrue(cv2.imwrite(str(first), image))
-            self.assertTrue(cv2.imwrite(str(second), image))
+            encoded, png = cv2.imencode(".png", image)
+            self.assertTrue(encoded)
+            first.write_bytes(png.tobytes())
+            second.write_bytes(png.tobytes())
 
             result = analyze_batch(
                 (path for path in (first, second)),
@@ -138,6 +175,65 @@ class BatchServiceTests(unittest.TestCase):
                 )
 
             self.assertFalse(results_root.exists())
+
+    def test_progress_failure_removes_unpublished_batch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            results_root = root / "results"
+
+            def fail_progress(_index, _total, _name):
+                raise RuntimeError("progress callback failed")
+
+            with self.assertRaisesRegex(RuntimeError, "progress callback failed"):
+                analyze_batch(
+                    [root / "unused.png"],
+                    AnalysisSettings(results_root=results_root),
+                    progress=fail_progress,
+                )
+
+            self.assert_results_root_is_empty(results_root)
+
+    def test_report_failure_removes_unpublished_batch(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+
+            with mock.patch.object(
+                batch_service,
+                "_write_batch_reports",
+                side_effect=OSError("report write failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "report write failed"):
+                    analyze_batch(
+                        [source],
+                        AnalysisSettings(results_root=results_root),
+                    )
+
+            self.assert_results_root_is_empty(results_root)
+
+    def test_zip_failure_removes_unpublished_batch(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+
+            with mock.patch.object(
+                batch_service,
+                "_create_batch_zip",
+                side_effect=OSError("ZIP write failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "ZIP write failed"):
+                    analyze_batch(
+                        [source],
+                        AnalysisSettings(results_root=results_root),
+                    )
+
+            self.assert_results_root_is_empty(results_root)
 
 
 if __name__ == "__main__":
