@@ -17,30 +17,180 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install pyinstaller opencv-python numpy matplotlib
+      - name: Install runtime and packaging dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Install research test dependency
+        run: python -m pip install "matplotlib>=3.9,<4"
+
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
       - name: Compile Python modules
-        run: python -m py_compile app_standalone.py grid_detector.py research/__init__.py research/annotate_inner_squares.py research/evaluate_cropping.py
-      - run: pyinstaller --onedir --name "CoagulationAnalysis" app_standalone.py
+        run: >-
+          python -m py_compile
+          app.py
+          app_standalone.py
+          analysis_service.py
+          batch_service.py
+          grid_detector.py
+          web_controller.py
+          web_launcher.py
+          research/__init__.py
+          research/annotate_inner_squares.py
+          research/evaluate_cropping.py
 
-      - name: Zip (Windows)
+      - name: Build Windows offline website
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/CoagulationAnalysis/* -DestinationPath CoagulationAnalysis-Windows.zip
+        shell: pwsh
+        run: pyinstaller --clean --noconfirm --onedir --collect-all gradio --add-data "web_styles.css;." --name StartWebsite web_launcher.py
 
-      - name: Zip (macOS)
+      - name: Build Windows desktop app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pyinstaller --clean --noconfirm --onedir --name CoagulationAnalysis app_standalone.py
+
+      - name: Smoke test packaged Windows website
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/StartWebsite/StartWebsite.exe" `
+            -ArgumentList @("--port", "7860", "--no-browser", "--results-root", "$env:RUNNER_TEMP/results") `
+            -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $response = $null
+            $lastError = $null
+            do {
+              if ($process.HasExited) {
+                throw "Packaged website exited before becoming ready with code $($process.ExitCode)."
+              }
+              try {
+                $response = Invoke-WebRequest `
+                  -Uri "http://127.0.0.1:7860" `
+                  -UseBasicParsing `
+                  -TimeoutSec 5
+                if ($response.StatusCode -eq 200) {
+                  break
+                }
+              } catch {
+                $lastError = $_
+              }
+              Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $deadline)
+
+            if ($null -eq $response -or $response.StatusCode -ne 200) {
+              throw "Packaged website did not return HTTP 200 within 60 seconds. Last error: $lastError"
+            }
+            $html = [string]$response.Content
+            if ($html -notmatch "Coagulation Analysis") {
+              throw "Packaged website response did not contain the application title."
+            }
+            $forbiddenExternalReferences = @(
+              "http://",
+              "https://",
+              "@import",
+              "url(",
+              "fonts.googleapis.com",
+              "fonts.gstatic.com",
+              "cdnjs.cloudflare.com",
+              "cdn.jsdelivr.net",
+              "unpkg.com"
+            )
+            foreach ($reference in $forbiddenExternalReferences) {
+              if ($html.IndexOf($reference, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Packaged website response contained forbidden external reference: $reference"
+              }
+            }
+            if ($html -match '(?i)(?:src|href)\s*=\s*["'']//') {
+              throw "Packaged website response referenced a protocol-relative resource."
+            }
+          } finally {
+            if ($null -ne $process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Assemble Windows release archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $releaseRoot = "release/CoagulationAnalysis-Windows"
+          if (Test-Path "release") {
+            Remove-Item "release" -Recurse -Force
+          }
+          if (Test-Path "CoagulationAnalysis-Windows.zip") {
+            Remove-Item "CoagulationAnalysis-Windows.zip" -Force
+          }
+          New-Item -ItemType Directory -Force -Path "$releaseRoot/Web" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$releaseRoot/Desktop" | Out-Null
+          Copy-Item -Path "dist/StartWebsite/*" -Destination "$releaseRoot/Web" -Recurse -Force
+          Copy-Item -Path "dist/CoagulationAnalysis/*" -Destination "$releaseRoot/Desktop" -Recurse -Force
+          Copy-Item README.md "$releaseRoot/README.md"
+
+          if (-not (Test-Path "$releaseRoot/Web/StartWebsite.exe" -PathType Leaf)) {
+            throw "Windows website executable is missing from the release layout."
+          }
+          if (-not (Test-Path "$releaseRoot/Desktop/CoagulationAnalysis.exe" -PathType Leaf)) {
+            throw "Windows desktop executable is missing from the release layout."
+          }
+          Compress-Archive -Path "$releaseRoot/*" -DestinationPath "CoagulationAnalysis-Windows.zip"
+
+      - name: Build macOS desktop app
+        if: runner.os == 'macOS'
+        run: pyinstaller --clean --noconfirm --onedir --name CoagulationAnalysis app_standalone.py
+
+      - name: Assemble macOS desktop archive
         if: runner.os == 'macOS'
         run: |
-          ls -la dist/
-          cd dist && zip -r ../CoagulationAnalysis-Mac.zip .
+          test -f dist/CoagulationAnalysis/CoagulationAnalysis
+          rm -f CoagulationAnalysis-Mac.zip
+          cd dist
+          zip -r ../CoagulationAnalysis-Mac.zip CoagulationAnalysis
 
-      - name: Upload to Release
+      - name: Upload Windows package artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: CoagulationAnalysis-Windows.zip
+          if-no-files-found: error
+
+      - name: Upload macOS package artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: CoagulationAnalysis-Mac.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Upload platform packages to release
         uses: softprops/action-gh-release@v2
         with:
-          files: CoagulationAnalysis-${{ runner.os == 'Windows' && 'Windows' || 'Mac' }}.zip
+          files: |
+            release-artifacts/CoagulationAnalysis-Windows.zip
+            release-artifacts/CoagulationAnalysis-Mac.zip
           tag_name: latest
           name: "Coagulation Analysis"
-          body: "Latest build. Download, unzip, drag a slide image onto the executable.\n\nWindows: CoagulationAnalysis.exe\nMac: CoagulationAnalysis"
+          body: |
+            Latest offline builds for Windows and macOS.
+
+            Windows: Web/StartWebsite.exe is the recommended offline entry. It serves the bundled interface on this computer only and does not require an external website at runtime. Desktop/CoagulationAnalysis.exe remains available for drag-and-drop desktop analysis.
+
+            macOS: CoagulationAnalysis is the desktop executable.
           make_latest: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
