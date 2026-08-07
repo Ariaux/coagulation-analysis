@@ -133,6 +133,23 @@ class WebControllerTests(unittest.TestCase):
                     )
                     self.assert_single_response_has_no_artifacts(response)
 
+    def test_unexpected_single_service_error_returns_failure_without_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            web_controller,
+            "analyze_image",
+            side_effect=Exception("unexpected analysis failure"),
+        ):
+            response = run_single_analysis(
+                Path(temp_dir) / "fixture.png",
+                5.0,
+                60.0,
+                Path(temp_dir) / "results",
+            )
+
+        self.assertFalse(response.ok)
+        self.assertEqual("unexpected analysis failure", response.status)
+        self.assert_single_response_has_no_artifacts(response)
+
     def test_batch_user_input_error_returns_explicit_failure_response(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             response = run_batch_analysis(
@@ -154,6 +171,29 @@ class WebControllerTests(unittest.TestCase):
             self.assertIsNone(response.failures_csv)
             self.assertIsNone(response.zip_path)
             self.assertIsNone(response.batch_dir)
+
+    def test_unexpected_batch_service_error_returns_failure_without_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            web_controller,
+            "analyze_batch",
+            side_effect=Exception("unexpected batch failure"),
+        ):
+            response = run_batch_analysis(
+                [Path(temp_dir) / "fixture.png"],
+                5.0,
+                60.0,
+                Path(temp_dir) / "results",
+            )
+
+        self.assertFalse(response.ok)
+        self.assertEqual("unexpected batch failure", response.status)
+        self.assertEqual(0, response.success_count)
+        self.assertEqual(0, response.failure_count)
+        self.assertEqual([], response.rows)
+        self.assertIsNone(response.summary_csv)
+        self.assertIsNone(response.failures_csv)
+        self.assertIsNone(response.zip_path)
+        self.assertIsNone(response.batch_dir)
 
 
 class ResultFolderTests(unittest.TestCase):

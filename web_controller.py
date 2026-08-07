@@ -70,7 +70,7 @@ def run_single_analysis(
                 _results_path(results_root),
             ),
         )
-    except (TypeError, ValueError, OSError, RuntimeError) as exception:
+    except Exception as exception:
         return SingleWebResponse(ok=False, status=str(exception))
     return SingleWebResponse(
         ok=True,
@@ -115,7 +115,7 @@ def run_batch_analysis(
                 _results_path(results_root),
             ),
         )
-    except (TypeError, ValueError, OSError, RuntimeError) as exception:
+    except Exception as exception:
         return BatchWebResponse(ok=False, status=str(exception))
     rows = [
         [item["image"], 9, "Success", "", item["output_dir"]]
