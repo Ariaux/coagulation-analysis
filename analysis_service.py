@@ -29,14 +29,14 @@ class AnalysisSettings:
 
 def inset_bbox(
     bbox: BBox,
-    percent: float,
+    inset_percent: float,
     minimum_side: int = MIN_FINAL_CROP_SIDE,
 ) -> BBox:
     """Return a uniformly inset half-open bounding box."""
     left, top, right, bottom = bbox
     width = right - left
     height = bottom - top
-    inset = round(min(width, height) * float(percent) / 100)
+    inset = round(min(width, height) * float(inset_percent) / 100)
     inner_bbox = (left + inset, top + inset, right - inset, bottom - inset)
     inner_width = inner_bbox[2] - inner_bbox[0]
     inner_height = inner_bbox[3] - inner_bbox[1]

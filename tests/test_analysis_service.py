@@ -26,7 +26,10 @@ class AnalysisSettingsTests(unittest.TestCase):
                     ).validate()
 
     def test_inset_bbox_returns_inner_bbox_and_rejects_too_small_crops(self):
-        self.assertEqual((15, 25, 195, 115), inset_bbox((10, 20, 200, 120), 5.0))
+        self.assertEqual(
+            (15, 25, 195, 115),
+            inset_bbox((10, 20, 200, 120), inset_percent=5.0),
+        )
 
         with self.assertRaisesRegex(
             grid_detector.DetectionError, "too small after the inner inset"
