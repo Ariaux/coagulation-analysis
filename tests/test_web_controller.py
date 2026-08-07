@@ -1,7 +1,9 @@
 from contextlib import contextmanager
 import importlib
+import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -10,6 +12,8 @@ from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 import cv2
+from fastapi.testclient import TestClient
+from gradio import routes as gradio_routes
 
 import app as web_app
 from app import create_app
@@ -324,6 +328,190 @@ class WebApplicationTests(unittest.TestCase):
             with self.subTest(external_reference=external_reference):
                 self.assertNotIn(external_reference, stylesheet)
 
+    def test_title_and_status_styles_override_gradio_component_defaults(self):
+        config = self.make_config()
+        stylesheet = config["css"]
+        title = next(
+            component
+            for component in config["components"]
+            if component.get("props", {}).get("elem_id") == "application-title"
+        )
+
+        self.assertEqual("markdown", title["type"])
+        self.assertRegex(
+            stylesheet,
+            r"(?s)#application-title h1\s*\{[^}]*color:\s*var\(--navy\)\s*!important",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"(?s)body \.gradio-container div\.status-field\.block\s*\{[^}]*border-left:\s*4px solid var\(--blue\)\s*!important",
+        )
+        for label in ("Status", "Batch status"):
+            classes = self.one_component(config, label)["props"]["elem_classes"]
+            self.assertIn("status-field", classes)
+
+    def test_config_uses_system_fonts_and_contains_no_remote_resources(self):
+        config = self.make_config()
+        serialized = json.dumps(config)
+
+        self.assertEqual([], config["stylesheets"])
+        self.assertEqual([], config["footer_links"])
+        self.assertNotIn("http://", serialized)
+        self.assertNotIn("https://", serialized)
+        self.assertEqual("base", config["theme"])
+        theme = getattr(web_app, "_LOCAL_THEME", None)
+        self.assertIsNotNone(theme)
+        self.assertIn("system-ui", theme.font)
+        self.assertNotIn("http://", theme._get_theme_css())
+        self.assertNotIn("https://", theme._get_theme_css())
+
+    def test_server_templates_are_local_and_bootstrap_english_before_module(self):
+        config = self.make_config()
+        config.update(
+            body_css=config["body_css"] or {},
+            thumbnail=None,
+            simple_description="",
+        )
+        api_info = {
+            "named_endpoints": {
+                "/endpoint-marker": {
+                    "parameters": [],
+                    "returns": [],
+                    "code_snippets": {
+                        "python": 'Client("http://127.0.0.1:7860")',
+                    },
+                },
+            },
+            "unnamed_endpoints": {},
+        }
+
+        for template_name in ("frontend/index.html", "frontend/share.html"):
+            with self.subTest(template_name=template_name):
+                html = gradio_routes.templates.get_template(template_name).render(
+                    config=config,
+                    gradio_api_info=api_info,
+                )
+                lowered = html.lower()
+                self.assertNotIn("http://", lowered)
+                self.assertNotIn("https://", lowered)
+                for domain in (
+                    "fonts.googleapis.com",
+                    "fonts.gstatic.com",
+                    "cdnjs.cloudflare.com",
+                    "gradio.app",
+                ):
+                    self.assertNotIn(domain, lowered)
+                self.assertIn("window.gradio_config", html)
+                self.assertIn('type="module"', html)
+                self.assertIn("./assets/", html)
+                bootstrap_position = html.index("data-offline-language")
+                module_position = html.index('type="module"')
+                self.assertLess(bootstrap_position, module_position)
+                self.assertIn('document.documentElement.lang = "en"', html)
+                self.assertIn(
+                    "window.gradio_config.root = window.location.origin",
+                    html,
+                )
+                self.assertIn('navigator, "language"', html)
+                self.assertIn('navigator, "languages"', html)
+                self.assertIn("endpoint-marker", html)
+                self.assertNotIn("code_snippets", html)
+
+    def test_offline_template_installation_is_thread_safe_and_idempotent(self):
+        installer = getattr(web_app, "_install_offline_templates", None)
+        self.assertIsNotNone(installer)
+        environment = gradio_routes.templates.env
+        installed_loader = environment.loader
+        base_loader = installed_loader
+        while getattr(base_loader, "_coagulation_offline_templates", False):
+            base_loader = base_loader.loaders[-1]
+
+        errors = []
+        barrier = threading.Barrier(8)
+
+        def install_at_once():
+            try:
+                barrier.wait()
+                installer()
+            except BaseException as exception:
+                errors.append(exception)
+
+        try:
+            environment.loader = base_loader
+            environment.cache.clear()
+            threads = [threading.Thread(target=install_at_once) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual([], errors)
+            concurrent_loader = environment.loader
+            self.assertTrue(
+                getattr(concurrent_loader, "_coagulation_offline_templates", False)
+            )
+            installer()
+            self.assertIs(concurrent_loader, environment.loader)
+        finally:
+            environment.loader = installed_loader
+            environment.cache.clear()
+
+    def test_live_server_html_and_theme_have_no_http_resources(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        application = create_app(Path(temp_dir.name) / "results")
+        server = gradio_routes.App.create_app(application)
+
+        with TestClient(server) as client:
+            response = client.get(
+                "/",
+                headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+            theme = client.get("/theme.css")
+            configuration = client.get("/config")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(200, theme.status_code)
+        self.assertEqual(200, configuration.status_code)
+        for payload in (
+            response.text.lower(),
+            theme.text.lower(),
+            configuration.text.lower(),
+        ):
+            self.assertNotIn("http://", payload)
+            self.assertNotIn("https://", payload)
+        self.assertEqual("", configuration.json()["root"])
+        self.assertIn("./assets/", response.text)
+        self.assertIn("data-offline-language", response.text)
+
+    def test_frozen_app_uses_identical_embedded_css_when_file_is_missing(self):
+        stylesheet_path = Path(web_app.__file__).with_name("web_styles.css")
+        expected = stylesheet_path.read_text(encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def read_without_sibling(path, *args, **kwargs):
+            if path == stylesheet_path:
+                raise FileNotFoundError(path)
+            return original_read_text(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            sys,
+            "frozen",
+            True,
+            create=True,
+        ), mock.patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=read_without_sibling,
+        ):
+            try:
+                application = create_app(Path(temp_dir) / "results")
+            except FileNotFoundError as exception:
+                self.fail(f"Frozen application required sibling CSS: {exception}")
+
+        self.assertEqual(expected, application.get_config_file()["css"])
+
     def test_importing_app_does_not_start_a_server(self):
         with mock.patch.object(web_app.gr.Blocks, "launch") as launch:
             importlib.reload(web_app)
@@ -351,6 +539,7 @@ class WebApplicationTests(unittest.TestCase):
             server_name="127.0.0.1",
             share=False,
             inbrowser=True,
+            footer_links=[],
         )
 
 

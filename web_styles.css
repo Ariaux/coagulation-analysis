@@ -25,6 +25,10 @@ body {
   letter-spacing: -0.015em;
 }
 
+#application-title h1 {
+  color: var(--navy) !important;
+}
+
 .gradio-container .block,
 .gradio-container .form {
   border-color: rgba(24, 42, 69, 0.16);
@@ -48,8 +52,8 @@ body {
   border-color: var(--navy) !important;
 }
 
-.gradio-container .status-field {
-  border-left: 4px solid var(--blue);
+body .gradio-container div.status-field.block {
+  border-left: 4px solid var(--blue) !important;
 }
 
 .gradio-container .status-field textarea,
