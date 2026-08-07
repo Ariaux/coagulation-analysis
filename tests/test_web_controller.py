@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 import cv2
@@ -162,6 +162,32 @@ class WebControllerTests(unittest.TestCase):
                 web_controller,
                 "analyze_image",
                 side_effect=Exception(f"unexpected failure at {secret_path}"),
+            ), mock.patch.object(
+                logging.getLogger("web_controller"), "exception"
+            ) as log_error:
+                response = run_single_analysis(
+                    Path(temp_dir) / "fixture.png",
+                    5.0,
+                    60.0,
+                    Path(temp_dir) / "results",
+                )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(
+            "Analysis failed unexpectedly. Check the local log and try again.",
+            response.status,
+        )
+        self.assertNotIn(str(secret_path), response.status)
+        log_error.assert_called_once()
+        self.assert_single_response_has_no_artifacts(response)
+
+    def test_single_service_value_error_is_logged_and_sanitized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret_path = Path(temp_dir) / "private" / "value-error.txt"
+            with mock.patch.object(
+                web_controller,
+                "analyze_image",
+                side_effect=ValueError(f"internal failure at {secret_path}"),
             ), mock.patch.object(
                 logging.getLogger("web_controller"), "exception"
             ) as log_error:
@@ -361,7 +387,9 @@ class WebControllerTests(unittest.TestCase):
                 web_controller,
                 "analyze_batch",
                 side_effect=ValueError("service received materialized inputs"),
-            ) as analyze:
+            ) as analyze, mock.patch.object(
+                logging.getLogger("web_controller"), "exception"
+            ) as log_error:
                 response = run_batch_analysis(
                     one_shot_sources(),
                     5.0,
@@ -370,12 +398,42 @@ class WebControllerTests(unittest.TestCase):
                 )
 
         self.assertFalse(response.ok)
-        self.assertEqual("service received materialized inputs", response.status)
+        self.assertEqual(
+            "Batch processing failed unexpectedly. Check the local log and try again.",
+            response.status,
+        )
         self.assertEqual(sources, yields)
         self.assertEqual(sources, analyze.call_args.args[0])
+        log_error.assert_called_once()
 
 
 class ResultFolderTests(unittest.TestCase):
+    class FakeWindowsHandleApi:
+        FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+        FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+
+        def __init__(self, reparse_paths=(), final_paths=None):
+            self.reparse_paths = set(reparse_paths)
+            self.final_paths = final_paths or {}
+            self.opened = []
+            self.closed = []
+
+        def open_directory(self, path):
+            self.opened.append(path)
+            return path
+
+        def attributes(self, handle):
+            attributes = self.FILE_ATTRIBUTE_DIRECTORY
+            if handle in self.reparse_paths:
+                attributes |= self.FILE_ATTRIBUTE_REPARSE_POINT
+            return attributes
+
+        def final_path(self, handle):
+            return self.final_paths.get(handle, handle)
+
+        def close(self, handle):
+            self.closed.append(handle)
+
     def test_opens_contained_result_folder_with_platform_command(self):
         cases = (
             ("win32", "explorer", "C:\\results\\fixture_analysis", {}),
@@ -501,6 +559,119 @@ class ResultFolderTests(unittest.TestCase):
 
             self.assertEqual("Result folder is unavailable.", message)
             popen.assert_not_called()
+
+    def test_accepts_canonical_candidate_beneath_symlinked_root_alias(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            canonical_root = base / "canonical-results"
+            candidate = canonical_root / "fixture_analysis"
+            alias_root = base / "results-alias"
+            candidate.mkdir(parents=True)
+            try:
+                alias_root.symlink_to(canonical_root, target_is_directory=True)
+            except OSError as exception:
+                self.skipTest(f"Directory symlinks are unavailable: {exception}")
+            with mock.patch.object(web_controller.subprocess, "Popen") as popen:
+                message = open_result_folder(candidate.resolve(), alias_root)
+
+            self.assertEqual("Opened result folder: fixture_analysis", message)
+            popen.assert_called_once()
+
+    def test_swap_of_root_ancestor_after_resolution_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            trusted_parent = base / "trusted"
+            root = trusted_parent / "results"
+            candidate = root / "fixture_analysis"
+            moved_parent = base / "trusted-original"
+            outside_parent = base / "outside"
+            outside_candidate = outside_parent / "results" / "fixture_analysis"
+            candidate.mkdir(parents=True)
+            outside_candidate.mkdir(parents=True)
+            real_resolve_candidate = web_controller._resolve_candidate_path
+            swapped = False
+
+            def resolve_then_swap(value):
+                nonlocal swapped
+                resolved = real_resolve_candidate(value)
+                trusted_parent.rename(moved_parent)
+                try:
+                    trusted_parent.symlink_to(outside_parent, target_is_directory=True)
+                except OSError as exception:
+                    self.skipTest(
+                        f"Directory symlinks are unavailable: {exception}"
+                    )
+                swapped = True
+                return resolved
+
+            with mock.patch.object(
+                web_controller,
+                "_resolve_candidate_path",
+                side_effect=resolve_then_swap,
+            ), mock.patch.object(web_controller.subprocess, "Popen") as popen:
+                message = open_result_folder(candidate, root)
+
+            self.assertTrue(swapped)
+            self.assertEqual("Result folder is unavailable.", message)
+            popen.assert_not_called()
+
+    def test_windows_intermediate_reparse_handle_is_rejected_without_launch(self):
+        root = PureWindowsPath(r"C:\trusted\results")
+        candidate = root / "fixture_analysis"
+        api = self.FakeWindowsHandleApi(reparse_paths={r"C:\trusted"})
+        with mock.patch.object(
+            web_controller,
+            "_resolve_root_path",
+            return_value=root,
+        ), mock.patch.object(
+            web_controller,
+            "_resolve_candidate_path",
+            return_value=candidate,
+        ), mock.patch.object(
+            web_controller,
+            "_windows_handle_api",
+            return_value=api,
+        ), mock.patch.object(
+            web_controller.sys,
+            "platform",
+            "win32",
+        ), mock.patch.object(web_controller.subprocess, "Popen") as popen:
+            message = open_result_folder(str(candidate), str(root))
+
+        self.assertEqual("Result folder is unavailable.", message)
+        self.assertIn(r"C:\trusted", api.opened)
+        popen.assert_not_called()
+
+    def test_windows_final_root_mismatch_is_rejected_without_launch(self):
+        root = PureWindowsPath(r"C:\trusted\results")
+        candidate = root / "fixture_analysis"
+        api = self.FakeWindowsHandleApi(
+            final_paths={
+                str(root): r"D:\outside\results",
+                str(candidate): r"D:\outside\results\fixture_analysis",
+            }
+        )
+        with mock.patch.object(
+            web_controller,
+            "_resolve_root_path",
+            return_value=root,
+        ), mock.patch.object(
+            web_controller,
+            "_resolve_candidate_path",
+            return_value=candidate,
+        ), mock.patch.object(
+            web_controller,
+            "_windows_handle_api",
+            return_value=api,
+        ), mock.patch.object(
+            web_controller.sys,
+            "platform",
+            "win32",
+        ), mock.patch.object(web_controller.subprocess, "Popen") as popen:
+            message = open_result_folder(str(candidate), str(root))
+
+        self.assertEqual("Result folder is unavailable.", message)
+        popen.assert_not_called()
 
     def test_swap_to_symlink_between_resolve_and_open_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Any, Iterator
 
-from analysis_service import AnalysisSettings, analyze_image
+from analysis_service import SUPPORTED_IMAGE_SUFFIXES, AnalysisSettings, analyze_image
 from batch_service import analyze_batch
 from grid_detector import DetectionError
 
@@ -34,6 +34,10 @@ BATCH_UNEXPECTED_ERROR = (
 
 class _ServicePayloadError(RuntimeError):
     """Raised when a service returns an invalid controller payload."""
+
+
+class WebInputError(ValueError):
+    """Raised for actionable validation errors originating at the web boundary."""
 
 
 @dataclass
@@ -67,14 +71,31 @@ def _number(value: object, label: str) -> float:
     try:
         return float(value)
     except (TypeError, ValueError) as exception:
-        raise ValueError(f"{label} must be a number.") from exception
+        raise WebInputError(f"{label} must be a number.") from exception
 
 
 def _results_path(results_root: str | Path) -> Path:
     try:
         return Path(results_root)
     except (TypeError, ValueError) as exception:
-        raise ValueError("Results folder is unavailable.") from exception
+        raise WebInputError("Results folder is unavailable.") from exception
+
+
+def _validated_settings(
+    inset: float | str,
+    threshold: float | str,
+    results_root: str | Path,
+) -> AnalysisSettings:
+    settings = AnalysisSettings(
+        _number(inset, "Inner crop inset"),
+        _number(threshold, "No-clot threshold"),
+        _results_path(results_root),
+    )
+    try:
+        settings.validate()
+    except ValueError as exception:
+        raise WebInputError(str(exception)) from exception
+    return settings
 
 
 def _payload_mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -181,9 +202,9 @@ def _build_single_response(
 
 
 def _single_failure(exception: Exception) -> SingleWebResponse:
-    if isinstance(exception, DetectionError):
+    if isinstance(exception, WebInputError):
         return SingleWebResponse(ok=False, status=str(exception))
-    if isinstance(exception, ValueError):
+    if isinstance(exception, DetectionError):
         return SingleWebResponse(ok=False, status=str(exception))
     if isinstance(exception, OSError):
         LOGGER.exception("Single analysis filesystem failure")
@@ -200,17 +221,21 @@ def run_single_analysis(
 ) -> SingleWebResponse:
     try:
         if path is None or (isinstance(path, str) and not path.strip()):
-            raise ValueError("Select an image to analyze.")
-        results_path = _results_path(results_root)
+            raise WebInputError("Select an image to analyze.")
+        try:
+            source = Path(path)
+        except (TypeError, ValueError) as exception:
+            raise WebInputError("Select an image to analyze.") from exception
+        if source.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
+            raise WebInputError(
+                "Supported image types are PNG, JPG, JPEG, BMP, and TIFF."
+            )
+        settings = _validated_settings(inset, threshold, results_root)
         result = analyze_image(
-            Path(path),
-            AnalysisSettings(
-                _number(inset, "Inner crop inset"),
-                _number(threshold, "No-clot threshold"),
-                results_path,
-            ),
+            source,
+            settings,
         )
-        return _build_single_response(result, results_path)
+        return _build_single_response(result, Path(settings.results_root))
     except Exception as exception:
         return _single_failure(exception)
 
@@ -296,9 +321,9 @@ def _build_batch_response(
 
 
 def _batch_failure(exception: Exception) -> BatchWebResponse:
-    if isinstance(exception, DetectionError):
+    if isinstance(exception, WebInputError):
         return BatchWebResponse(ok=False, status=str(exception))
-    if isinstance(exception, ValueError):
+    if isinstance(exception, DetectionError):
         return BatchWebResponse(ok=False, status=str(exception))
     if isinstance(exception, OSError):
         LOGGER.exception("Batch analysis filesystem failure")
@@ -315,24 +340,20 @@ def run_batch_analysis(
 ) -> BatchWebResponse:
     try:
         if paths is None:
-            raise ValueError("Select at least one image for batch processing.")
+            raise WebInputError("Select at least one image for batch processing.")
         if isinstance(paths, (str, os.PathLike)):
-            raise ValueError("Select images as a batch, not as a single path.")
+            raise WebInputError("Select images as a batch, not as a single path.")
         sources = list(paths)
         if not sources:
-            raise ValueError("Select at least one image for batch processing.")
+            raise WebInputError("Select at least one image for batch processing.")
         if not all(isinstance(source, (str, os.PathLike)) for source in sources):
-            raise ValueError("Each batch item must be an image path.")
-        results_path = _results_path(results_root)
+            raise WebInputError("Each batch item must be an image path.")
+        settings = _validated_settings(inset, threshold, results_root)
         result = analyze_batch(
             sources,
-            AnalysisSettings(
-                _number(inset, "Inner crop inset"),
-                _number(threshold, "No-clot threshold"),
-                results_path,
-            ),
+            settings,
         )
-        return _build_batch_response(result, results_path)
+        return _build_batch_response(result, Path(settings.results_root))
     except Exception as exception:
         return _batch_failure(exception)
 
@@ -394,17 +415,20 @@ def _open_posix_result_directory(root: Path, candidate: Path) -> Iterator[int]:
         raise OSError("Secure directory handles are unavailable.")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     flags |= getattr(os, "O_CLOEXEC", 0)
+    if not root.is_absolute() or root.anchor != os.path.sep:
+        raise OSError("Result root must be an absolute POSIX path.")
     relative = candidate.relative_to(root)
     if any(part in ("", ".", "..") for part in relative.parts):
         raise OSError("Invalid result directory path.")
 
     handles: list[int] = []
     try:
-        current = os.open(os.fspath(root), flags)
+        current = os.open(os.path.sep, flags)
         handles.append(current)
         if not stat.S_ISDIR(os.fstat(current).st_mode):
-            raise OSError("Result root is not a directory.")
-        for component in relative.parts:
+            raise OSError("Filesystem root is not a directory.")
+        root_components = root.parts[1:]
+        for component in (*root_components, *relative.parts):
             current = os.open(component, flags, dir_fd=current)
             handles.append(current)
             if not stat.S_ISDIR(os.fstat(current).st_mode):
@@ -523,27 +547,56 @@ def _windows_handle_api() -> _WindowsDirectoryHandleApi:
     return _WindowsDirectoryHandleApi()
 
 
+def _windows_path_prefixes(path: str) -> list[str]:
+    normalized = ntpath.normpath(path)
+    drive, tail = ntpath.splitdrive(normalized)
+    if not drive or not tail.startswith(("\\", "/")):
+        raise OSError("Windows result path must be absolute.")
+    current = drive + "\\"
+    prefixes = [current]
+    for component in [part for part in tail.replace("/", "\\").split("\\") if part]:
+        if component in (".", ".."):
+            raise OSError("Invalid Windows result path.")
+        current = ntpath.join(current, component)
+        prefixes.append(current)
+    return prefixes
+
+
+def _same_windows_path(first: str, second: str) -> bool:
+    return ntpath.normcase(ntpath.normpath(first)) == ntpath.normcase(
+        ntpath.normpath(second)
+    )
+
+
 @contextmanager
 def _open_windows_result_directory(
     root: Path,
     candidate: Path,
 ) -> Iterator[str]:
     api = _windows_handle_api()
-    relative = candidate.relative_to(root)
-    paths = [root]
-    current = root
-    for component in relative.parts:
+    root_text = ntpath.normpath(os.fspath(root))
+    candidate_text = ntpath.normpath(os.fspath(candidate))
+    if not _lexically_contained(candidate_text, root_text, "win32"):
+        raise OSError("Result path is outside the result root.")
+    paths = _windows_path_prefixes(root_text)
+    relative = ntpath.relpath(candidate_text, root_text)
+    current = root_text
+    relative_components = (
+        []
+        if relative == "."
+        else [part for part in relative.replace("/", "\\").split("\\") if part]
+    )
+    for component in relative_components:
         if component in ("", ".", ".."):
             raise OSError("Invalid result directory path.")
-        current = current / component
+        current = ntpath.join(current, component)
         paths.append(current)
 
     handles: list[object] = []
-    root_final: str | None = None
     final_path: str | None = None
     try:
-        for path in paths:
-            handle = api.open_directory(str(path))
+        for expected_path in paths:
+            handle = api.open_directory(expected_path)
             handles.append(handle)
             attributes = api.attributes(handle)
             if not attributes & api.FILE_ATTRIBUTE_DIRECTORY:
@@ -551,10 +604,8 @@ def _open_windows_result_directory(
             if attributes & api.FILE_ATTRIBUTE_REPARSE_POINT:
                 raise OSError("Result path cannot be a reparse point.")
             final_path = api.final_path(handle)
-            if root_final is None:
-                root_final = final_path
-            elif not _lexically_contained(final_path, root_final, "win32"):
-                raise OSError("Result path is outside the result root.")
+            if not _same_windows_path(final_path, expected_path):
+                raise OSError("Opened result path does not match its canonical path.")
         if final_path is None:
             raise OSError("Result path is unavailable.")
         yield final_path
@@ -585,11 +636,17 @@ def _open_stable_result_directory(
 def open_result_folder(path: str, results_root: str | Path) -> str:
     """Open a published result directory only when it is inside the result root."""
     platform = sys.platform
-    if not _lexically_contained(path, results_root, platform):
-        return "Result folder is unavailable."
     try:
         display_name = _display_folder_name(path, platform)
         root = _resolve_root_path(results_root)
+    except (TypeError, ValueError, OSError, RuntimeError):
+        return "Result folder is unavailable."
+    if not (
+        _lexically_contained(path, results_root, platform)
+        or _lexically_contained(path, root, platform)
+    ):
+        return "Result folder is unavailable."
+    try:
         candidate = _resolve_candidate_path(path)
     except (TypeError, ValueError, OSError, RuntimeError):
         return "Result folder is unavailable."
