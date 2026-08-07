@@ -1,14 +1,18 @@
 from contextlib import contextmanager
+import importlib
 import logging
 import os
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 import cv2
 
+import app as web_app
+from app import create_app
 from tests.test_grid_detector import make_fixture
 import web_controller
 from web_controller import (
@@ -24,6 +28,330 @@ def write_fixture(path: Path) -> None:
     if not success:
         raise AssertionError(f"Could not encode fixture as {path.suffix}")
     path.write_bytes(encoded.tobytes())
+
+
+class WebApplicationTests(unittest.TestCase):
+    def make_config(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        application = create_app(Path(temp_dir.name) / "results")
+        return application.get_config_file()
+
+    def components_with_label(self, config, label):
+        return [
+            component
+            for component in config["components"]
+            if component.get("props", {}).get("label") == label
+        ]
+
+    def one_component(self, config, label):
+        components = self.components_with_label(config, label)
+        self.assertEqual(1, len(components), label)
+        return components[0]
+
+    def component_name(self, components_by_id, component_id):
+        component = components_by_id[component_id]
+        props = component.get("props", {})
+        return props.get("label", props.get("value", component["type"]))
+
+    def dependency_for_button(self, config, button_value):
+        components_by_id = {
+            component["id"]: component for component in config["components"]
+        }
+        button = next(
+            component
+            for component in config["components"]
+            if component["type"] == "button"
+            and component.get("props", {}).get("value") == button_value
+        )
+        dependencies = [
+            dependency
+            for dependency in config["dependencies"]
+            if any(
+                target[0] == button["id"] and target[1] == "click"
+                for target in dependency["targets"]
+            )
+        ]
+        self.assertEqual(1, len(dependencies), button_value)
+        dependency = dependencies[0]
+        return (
+            dependency,
+            [
+                self.component_name(components_by_id, component_id)
+                for component_id in dependency["inputs"]
+            ],
+            [
+                self.component_name(components_by_id, component_id)
+                for component_id in dependency["outputs"]
+            ],
+        )
+
+    def test_create_app_builds_without_starting_a_server(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app(Path(temp_dir) / "results")
+
+        self.assertIsNotNone(app)
+        serialized = str(app.get_config_file())
+        for label in (
+            "Single Image",
+            "Batch Processing",
+            "Inner crop inset",
+            "No-clot threshold",
+            "Analyze Image",
+            "Analyze Batch",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, serialized)
+
+    def test_single_adapter_returns_all_controller_values_in_output_order(self):
+        adapter = getattr(web_app, "_single_values", None)
+        self.assertIsNotNone(adapter)
+        response = SimpleNamespace(
+            crops=[],
+            overlay_path=None,
+            heatmap_path=None,
+            rows=[],
+            csv_path=None,
+            zip_path=None,
+            output_dir=None,
+            status="Select an image to analyze.",
+        )
+        with mock.patch.object(
+            web_app,
+            "run_single_analysis",
+            return_value=response,
+        ) as run:
+            values = adapter(None, 5, 60, Path("results"))
+
+        run.assert_called_once_with(None, 5, 60, Path("results"))
+        self.assertEqual(
+            ([], None, None, [], None, None, None, response.status),
+            values,
+        )
+
+    def test_batch_adapter_normalizes_empty_input_and_orders_outputs(self):
+        adapter = getattr(web_app, "_batch_values", None)
+        self.assertIsNotNone(adapter)
+        response = SimpleNamespace(
+            rows=[],
+            summary_csv=None,
+            failures_csv=None,
+            zip_path=None,
+            batch_dir=None,
+            status="Select at least one image for batch processing.",
+        )
+        with mock.patch.object(
+            web_app,
+            "run_batch_analysis",
+            return_value=response,
+        ) as run:
+            values = adapter(None, 5, 60, Path("results"))
+
+        run.assert_called_once_with([], 5, 60, Path("results"))
+        self.assertEqual(
+            ([], None, None, None, None, response.status),
+            values,
+        )
+
+    def test_single_tab_components_follow_browser_contract(self):
+        config = self.make_config()
+
+        source = self.one_component(config, "Complete 3×3 fixture image")
+        self.assertEqual("file", source["type"])
+        self.assertEqual("filepath", source["props"]["type"])
+        self.assertEqual("single", source["props"]["file_count"])
+
+        gallery = self.one_component(config, "Final inner crops")
+        self.assertEqual("gallery", gallery["type"])
+        self.assertEqual(3, gallery["props"]["columns"])
+        self.assertEqual(3, gallery["props"]["rows"])
+
+        for label in ("Detected and final boundaries", "Publication heatmap"):
+            preview = self.one_component(config, label)
+            self.assertEqual("image", preview["type"])
+            self.assertEqual("filepath", preview["props"]["type"])
+
+        table = self.one_component(config, "Per-cell results")
+        self.assertEqual(
+            ["Cell", "Row", "Column", "Mean", "Confidence", "Recovered"],
+            table["props"]["headers"],
+        )
+        self.assertFalse(table["props"]["interactive"])
+
+        for label in ("Status", "Saved result folder"):
+            self.assertFalse(self.one_component(config, label)["props"]["interactive"])
+        for label in ("Download CSV", "Download result ZIP"):
+            self.assertEqual("file", self.one_component(config, label)["type"])
+
+    def test_batch_tab_components_follow_browser_contract(self):
+        config = self.make_config()
+
+        sources = self.one_component(config, "Complete 3×3 fixture images")
+        self.assertEqual("file", sources["type"])
+        self.assertEqual("filepath", sources["props"]["type"])
+        self.assertEqual("multiple", sources["props"]["file_count"])
+
+        table = self.one_component(config, "Batch results")
+        self.assertEqual(
+            ["Image", "Cells", "Status", "Reason", "Result"],
+            table["props"]["headers"],
+        )
+        self.assertFalse(table["props"]["interactive"])
+
+        for label in ("Batch status", "Saved batch folder"):
+            self.assertFalse(self.one_component(config, label)["props"]["interactive"])
+        for label in (
+            "Batch summary CSV",
+            "Failure report CSV",
+            "Download batch ZIP",
+        ):
+            self.assertEqual("file", self.one_component(config, label)["type"])
+
+    def test_callbacks_have_exact_wiring_and_independent_tab_settings(self):
+        config = self.make_config()
+
+        single, single_inputs, single_outputs = self.dependency_for_button(
+            config,
+            "Analyze Image",
+        )
+        self.assertEqual(
+            [
+                "Complete 3×3 fixture image",
+                "Inner crop inset",
+                "No-clot threshold",
+            ],
+            single_inputs,
+        )
+        self.assertEqual(
+            [
+                "Final inner crops",
+                "Detected and final boundaries",
+                "Publication heatmap",
+                "Per-cell results",
+                "Download CSV",
+                "Download result ZIP",
+                "Saved result folder",
+                "Status",
+            ],
+            single_outputs,
+        )
+
+        batch, batch_inputs, batch_outputs = self.dependency_for_button(
+            config,
+            "Analyze Batch",
+        )
+        self.assertEqual(
+            [
+                "Complete 3×3 fixture images",
+                "Inner crop inset",
+                "No-clot threshold",
+            ],
+            batch_inputs,
+        )
+        self.assertEqual(
+            [
+                "Batch results",
+                "Batch summary CSV",
+                "Failure report CSV",
+                "Download batch ZIP",
+                "Saved batch folder",
+                "Batch status",
+            ],
+            batch_outputs,
+        )
+        self.assertTrue(single["backend_fn"])
+        self.assertTrue(batch["backend_fn"])
+        self.assertTrue(set(single["inputs"][1:]).isdisjoint(batch["inputs"][1:]))
+
+        _, folder_inputs, folder_outputs = self.dependency_for_button(
+            config,
+            "Open result folder",
+        )
+        self.assertEqual(["Saved result folder"], folder_inputs)
+        self.assertEqual(["Status"], folder_outputs)
+        _, folder_inputs, folder_outputs = self.dependency_for_button(
+            config,
+            "Open batch folder",
+        )
+        self.assertEqual(["Saved batch folder"], folder_inputs)
+        self.assertEqual(["Batch status"], folder_outputs)
+
+        for label, expected in (
+            ("Inner crop inset", (0, 15, 5, 0.5)),
+            ("No-clot threshold", (0, 255, 60, 1)),
+        ):
+            sliders = self.components_with_label(config, label)
+            self.assertEqual(2, len(sliders), label)
+            self.assertEqual(2, len({slider["id"] for slider in sliders}))
+            for slider in sliders:
+                props = slider["props"]
+                self.assertEqual(
+                    expected,
+                    (
+                        props["minimum"],
+                        props["maximum"],
+                        props["value"],
+                        props["step"],
+                    ),
+                )
+
+    def test_application_is_offline_and_includes_local_styles(self):
+        config = self.make_config()
+
+        self.assertEqual("Coagulation Analysis", config["title"])
+        self.assertFalse(config["analytics_enabled"])
+        self.assertEqual("False", os.environ["GRADIO_ANALYTICS_ENABLED"])
+        markdown_values = [
+            component.get("props", {}).get("value")
+            for component in config["components"]
+            if component["type"] == "markdown"
+        ]
+        self.assertIn("# Coagulation Analysis\nLocal and offline", markdown_values)
+
+        stylesheet = config["css"]
+        self.assertIsInstance(stylesheet, str)
+        for value in (
+            "#182a45",
+            "#3f78b5",
+            "#a42e3d",
+            "#ffffff",
+            "#f5f7fa",
+            "max-width: 1440px",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value, stylesheet)
+        for external_reference in ("http://", "https://", "@import", "url("):
+            with self.subTest(external_reference=external_reference):
+                self.assertNotIn(external_reference, stylesheet)
+
+    def test_importing_app_does_not_start_a_server(self):
+        with mock.patch.object(web_app.gr.Blocks, "launch") as launch:
+            importlib.reload(web_app)
+
+        launch.assert_not_called()
+
+    def test_main_launches_the_offline_site_on_loopback(self):
+        main = getattr(web_app, "main", None)
+        self.assertIsNotNone(main)
+        application = mock.Mock()
+        working_directory = Path("/tmp/coagulation-website")
+        with mock.patch.object(
+            web_app.Path,
+            "cwd",
+            return_value=working_directory,
+        ), mock.patch.object(
+            web_app,
+            "create_app",
+            return_value=application,
+        ) as create:
+            main()
+
+        create.assert_called_once_with(working_directory / "results")
+        application.launch.assert_called_once_with(
+            server_name="127.0.0.1",
+            share=False,
+            inbrowser=True,
+        )
 
 
 class WebControllerTests(unittest.TestCase):

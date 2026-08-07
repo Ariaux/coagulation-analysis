@@ -1,0 +1,59 @@
+:root {
+  --navy: #182a45;
+  --blue: #3f78b5;
+  --red: #a42e3d;
+  --surface: #ffffff;
+  --background: #f5f7fa;
+}
+
+body {
+  background: var(--background);
+}
+
+.gradio-container {
+  max-width: 1440px !important;
+  margin: 0 auto;
+  padding: 24px !important;
+  color: var(--navy);
+  background: var(--background);
+}
+
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3 {
+  color: var(--navy);
+  letter-spacing: -0.015em;
+}
+
+.gradio-container .block,
+.gradio-container .form {
+  border-color: rgba(24, 42, 69, 0.16);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.gradio-container .gap {
+  gap: 18px;
+}
+
+.gradio-container button.primary {
+  background: var(--red) !important;
+  border-color: var(--red) !important;
+  color: var(--surface) !important;
+  font-weight: 650;
+}
+
+.gradio-container button.primary:hover {
+  background: var(--navy) !important;
+  border-color: var(--navy) !important;
+}
+
+.gradio-container .status-field {
+  border-left: 4px solid var(--blue);
+}
+
+.gradio-container .status-field textarea,
+.gradio-container .status-field input {
+  color: var(--navy);
+  font-weight: 600;
+}
