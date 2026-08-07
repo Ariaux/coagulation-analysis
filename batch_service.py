@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import csv
+import ctypes
+import errno
 import json
 import os
 import shutil
+import sys
 import tempfile
+import threading
 import uuid
 import zipfile
 from datetime import datetime
@@ -17,6 +21,23 @@ from analysis_service import PALETTE_VERSION, AnalysisSettings, analyze_image
 
 
 Progress = Callable[[int, int, str], None]
+_BATCH_PUBLICATION_LOCKS: dict[Path, threading.Lock] = {}
+_BATCH_PUBLICATION_LOCKS_GUARD = threading.Lock()
+_DARWIN_RENAME_EXCL = 0x00000004
+_LINUX_AT_FDCWD = -100
+_LINUX_RENAME_NOREPLACE = 1
+
+
+def _new_batch_name() -> str:
+    return (
+        datetime.now().strftime("batch_%Y%m%d_%H%M%S_")
+        + uuid.uuid4().hex[:8]
+    )
+
+
+def _batch_publication_lock(root: Path) -> threading.Lock:
+    with _BATCH_PUBLICATION_LOCKS_GUARD:
+        return _BATCH_PUBLICATION_LOCKS.setdefault(root, threading.Lock())
 
 
 def analyze_batch(
@@ -35,10 +56,7 @@ def analyze_batch(
         if settings.results_root is not None
         else (Path.cwd() / "results").resolve()
     )
-    batch_name = (
-        datetime.now().strftime("batch_%Y%m%d_%H%M%S_")
-        + uuid.uuid4().hex[:8]
-    )
+    batch_name = _new_batch_name()
     batch_dir = root / batch_name
     root.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(
@@ -60,7 +78,15 @@ def analyze_batch(
             try:
                 successes.append(analyze_image(source, per_image_settings))
             except Exception as exception:
-                failures.append({"image": source.name, "reason": str(exception)})
+                failures.append(
+                    {
+                        "image": source.name,
+                        "reason": _portable_failure_reason(
+                            exception,
+                            staging_dir,
+                        ),
+                    }
+                )
 
         staged_result = _publish_batch(
             staging_dir,
@@ -68,13 +94,12 @@ def analyze_batch(
             successes,
             failures,
         )
-        published_result = _rebase_result_paths(
+        return _commit_batch_without_overwrite(
             staged_result,
             staging_dir,
+            root,
             batch_dir,
         )
-        os.replace(staging_dir, batch_dir)
-        return published_result
     except Exception as original_exception:
         try:
             if staging_dir.exists():
@@ -84,6 +109,105 @@ def analyze_batch(
                 f"Could not remove batch staging directory: {cleanup_exception}"
             )
         raise
+
+
+def _portable_failure_reason(exception: Exception, staging_dir: Path) -> str:
+    """Keep failure details while removing references to transient storage."""
+    reason = str(exception)
+    for staging_prefix in sorted(
+        {str(staging_dir), staging_dir.as_posix()},
+        key=len,
+        reverse=True,
+    ):
+        reason = reason.replace(staging_prefix, ".")
+    return reason.replace(staging_dir.name, "<batch>")
+
+
+def _commit_batch_without_overwrite(
+    staged_result: dict[str, Any],
+    staging_dir: Path,
+    root: Path,
+    initial_batch_dir: Path,
+) -> dict[str, Any]:
+    """Atomically publish to a fresh name without replacing existing entries."""
+    batch_dir = initial_batch_dir
+    with _batch_publication_lock(root):
+        while True:
+            if os.path.lexists(batch_dir):
+                batch_dir = root / _new_batch_name()
+                continue
+            published_result = _rebase_result_paths(
+                staged_result,
+                staging_dir,
+                batch_dir,
+            )
+            try:
+                _rename_no_replace(staging_dir, batch_dir)
+            except FileExistsError:
+                batch_dir = root / _new_batch_name()
+                continue
+            return published_result
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Rename a directory atomically, failing if the destination exists."""
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename_exclusive = getattr(libc, "renamex_np", None)
+        if rename_exclusive is not None:
+            rename_exclusive.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            rename_exclusive.restype = ctypes.c_int
+            if rename_exclusive(
+                os.fsencode(source),
+                os.fsencode(destination),
+                _DARWIN_RENAME_EXCL,
+            ) == 0:
+                return
+            error = ctypes.get_errno()
+            if error not in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP):
+                _raise_rename_error(error, destination)
+
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename_at2 = getattr(libc, "renameat2", None)
+        if rename_at2 is not None:
+            rename_at2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            rename_at2.restype = ctypes.c_int
+            if rename_at2(
+                _LINUX_AT_FDCWD,
+                os.fsencode(source),
+                _LINUX_AT_FDCWD,
+                os.fsencode(destination),
+                _LINUX_RENAME_NOREPLACE,
+            ) == 0:
+                return
+            error = ctypes.get_errno()
+            if error not in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP):
+                _raise_rename_error(error, destination)
+
+    if os.path.lexists(destination):
+        raise FileExistsError(
+            errno.EEXIST,
+            os.strerror(errno.EEXIST),
+            destination,
+        )
+    os.rename(source, destination)
+
+
+def _raise_rename_error(error: int, destination: Path) -> None:
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), destination)
+    raise OSError(error, os.strerror(error), destination)
 
 
 def _publish_batch(

@@ -235,6 +235,137 @@ class BatchServiceTests(unittest.TestCase):
 
             self.assert_results_root_is_empty(results_root)
 
+    def test_existing_empty_batch_directory_is_preserved_on_name_collision(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            results_root.mkdir()
+            self.assertTrue(cv2.imwrite(str(source), image))
+            first_name = "batch_20260807_120000_aaaaaaaa"
+            second_name = "batch_20260807_120000_bbbbbbbb"
+            collision = results_root / first_name
+            collision.mkdir()
+            collision_inode = collision.stat().st_ino
+
+            with mock.patch.object(batch_service, "datetime") as current_time:
+                current_time.now.return_value.strftime.return_value = (
+                    "batch_20260807_120000_"
+                )
+                with mock.patch.object(
+                    batch_service.uuid,
+                    "uuid4",
+                    side_effect=[
+                        mock.Mock(hex="a" * 32),
+                        mock.Mock(hex="b" * 32),
+                    ],
+                ):
+                    result = analyze_batch(
+                        [source],
+                        AnalysisSettings(results_root=results_root),
+                    )
+
+            self.assertEqual(collision_inode, collision.stat().st_ino)
+            self.assertEqual(
+                results_root.resolve() / second_name,
+                Path(result["batch_dir"]),
+            )
+            self.assertTrue(Path(result["zip_path"]).is_file())
+
+    def test_existing_symlink_is_preserved_on_name_collision(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            unrelated = root / "unrelated"
+            results_root.mkdir()
+            unrelated.mkdir()
+            sentinel = unrelated / "sentinel.txt"
+            sentinel.write_text("preserve me", encoding="utf-8")
+            missing_target = unrelated / "missing"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            first_name = "batch_20260807_120000_aaaaaaaa"
+            second_name = "batch_20260807_120000_bbbbbbbb"
+            collision = results_root / first_name
+            try:
+                collision.symlink_to(missing_target, target_is_directory=True)
+            except OSError as exception:
+                self.skipTest(f"Directory symlinks are unavailable: {exception}")
+
+            with mock.patch.object(batch_service, "datetime") as current_time:
+                current_time.now.return_value.strftime.return_value = (
+                    "batch_20260807_120000_"
+                )
+                with mock.patch.object(
+                    batch_service.uuid,
+                    "uuid4",
+                    side_effect=[
+                        mock.Mock(hex="a" * 32),
+                        mock.Mock(hex="b" * 32),
+                    ],
+                ):
+                    result = analyze_batch(
+                        [source],
+                        AnalysisSettings(results_root=results_root),
+                    )
+
+            self.assertTrue(collision.is_symlink())
+            self.assertFalse(collision.exists())
+            self.assertEqual(missing_target.resolve(), collision.resolve())
+            self.assertEqual("preserve me", sentinel.read_text(encoding="utf-8"))
+            self.assertEqual(
+                results_root.resolve() / second_name,
+                Path(result["batch_dir"]),
+            )
+
+    def test_failure_reasons_do_not_leak_deleted_staging_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            results_root = root / "results"
+            staging_paths = []
+
+            def fail_with_staging_path(_source, per_image_settings):
+                staging_dir = Path(per_image_settings.results_root)
+                staging_paths.append(str(staging_dir))
+                raise OSError(f"could not write {staging_dir / 'partial.txt'}")
+
+            with mock.patch.object(
+                batch_service,
+                "analyze_image",
+                side_effect=fail_with_staging_path,
+            ):
+                result = analyze_batch(
+                    [root / "fixture.png"],
+                    AnalysisSettings(results_root=results_root),
+                )
+
+            staging_prefix = staging_paths[0]
+            reason = result["failures"][0]["reason"]
+            self.assertIn("partial.txt", reason)
+            self.assertNotIn(staging_prefix, reason)
+            self.assertNotIn("_staging_", reason)
+
+            report_paths = [
+                Path(result["summary_csv"]),
+                Path(result["failures_csv"]),
+                Path(result["batch_dir"]) / "batch-metadata.json",
+            ]
+            for report_path in report_paths:
+                with self.subTest(report_path=report_path):
+                    contents = report_path.read_text(encoding="utf-8")
+                    self.assertNotIn(staging_prefix, contents)
+                    self.assertNotIn("_staging_", contents)
+
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                for name in archive.namelist():
+                    self.assertNotIn("_staging_", name)
+                    if name.endswith((".csv", ".json")):
+                        contents = archive.read(name).decode("utf-8")
+                        self.assertNotIn(staging_prefix, contents)
+                        self.assertNotIn("_staging_", contents)
+
 
 if __name__ == "__main__":
     unittest.main()
