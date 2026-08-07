@@ -220,7 +220,7 @@ class StandalonePipelineTests(unittest.TestCase):
                     "final_x2",
                     "final_y2",
                     "inset_percent",
-                    "crop_path",
+                    "crop_file",
                 ],
                 list(rows[0]),
             )

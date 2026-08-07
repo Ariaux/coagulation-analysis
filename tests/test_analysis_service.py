@@ -72,9 +72,10 @@ class SingleImageServiceTests(unittest.TestCase):
                 payload["settings"]["palette_version"],
             )
             self.assertEqual(
-                [cell["crop_path"] for cell in result["cells"]],
-                [cell["crop_path"] for cell in payload["cells"]],
+                [Path(cell["crop_path"]).name for cell in result["cells"]],
+                [cell["crop_file"] for cell in payload["cells"]],
             )
+            self.assertTrue(all("crop_path" not in cell for cell in payload["cells"]))
 
             with Path(result["csv_path"]).open(
                 newline="", encoding="utf-8"
@@ -83,7 +84,10 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertEqual(9, len(rows))
             self.assertIn("final_x1", rows[0])
             self.assertEqual("5.0", rows[0]["inset_percent"])
-            self.assertEqual(result["cells"][0]["crop_path"], rows[0]["crop_path"])
+            self.assertEqual(
+                Path(result["cells"][0]["crop_path"]).name,
+                rows[0]["crop_file"],
+            )
 
     def test_precommit_bundle_publish_failure_restores_the_prior_complete_result(self):
         image, _ = make_fixture(filled=(1, 5, 9))
@@ -146,6 +150,53 @@ class SingleImageServiceTests(unittest.TestCase):
                     for path in results_root.iterdir()
                 )
             )
+
+    def test_failed_rollback_preserves_owned_bundle_for_later_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            final_dir = root / "fixture_analysis"
+            staging_dir = root / ".fixture_staging"
+            final_dir.mkdir()
+            staging_dir.mkdir()
+            (final_dir / "prior.txt").write_text("prior", encoding="utf-8")
+            (staging_dir / "new.txt").write_text("new", encoding="utf-8")
+            real_replace = analysis_service.os.replace
+
+            def fail_publish_and_rollback(source_path, destination_path):
+                source_path = Path(source_path)
+                destination_path = Path(destination_path)
+                if destination_path == final_dir and source_path == staging_dir:
+                    raise OSError("simulated publish failure")
+                if destination_path == final_dir and source_path.name == "output":
+                    raise OSError("simulated rollback failure")
+                return real_replace(source_path, destination_path)
+
+            with mock.patch.object(
+                analysis_service.os,
+                "replace",
+                side_effect=fail_publish_and_rollback,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated publish failure"):
+                    analysis_service._atomic_publish_bundle(staging_dir, final_dir)
+
+            transactions = [
+                path
+                for path in root.iterdir()
+                if analysis_service._is_owned_transaction(path, final_dir)
+            ]
+            self.assertEqual(1, len(transactions))
+            self.assertEqual(
+                "prior",
+                (transactions[0] / "output" / "prior.txt").read_text(encoding="utf-8"),
+            )
+
+            analysis_service._recover_previous_bundle(final_dir)
+
+            self.assertEqual(
+                "prior",
+                (final_dir / "prior.txt").read_text(encoding="utf-8"),
+            )
+            self.assertFalse(transactions[0].exists())
 
     def test_partial_postcommit_cleanup_failure_keeps_new_result_complete(self):
         image, _ = make_fixture(filled=(1, 5, 9))
@@ -224,8 +275,7 @@ class SingleImageServiceTests(unittest.TestCase):
                 AnalysisSettings(5.0, 60.0, results_root),
             )
             final_dir = Path(prior["output_dir"])
-            transaction = final_dir.parent / f".{final_dir.name}.previous-stranded"
-            transaction.mkdir()
+            transaction = analysis_service._create_transaction_root(final_dir)
             os.replace(final_dir, transaction / "output")
             self.assertFalse(final_dir.exists())
 
@@ -234,6 +284,35 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertTrue(Path(prior["json_path"]).is_file())
             self.assertTrue(Path(prior["zip_path"]).is_file())
             self.assertFalse(transaction.exists())
+
+    def test_recovery_preserves_unowned_prefix_matching_directories(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            result = analyze_image(
+                source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            final_dir = Path(result["output_dir"])
+            lookalike = final_dir.parent / f".{final_dir.name}.previous-user-notes"
+            unowned_uuid = final_dir.parent / (f".{final_dir.name}.previous-{'0' * 32}")
+            for directory in (lookalike, unowned_uuid):
+                directory.mkdir()
+                (directory / "do-not-delete.txt").write_text(
+                    "user content",
+                    encoding="utf-8",
+                )
+
+            analysis_service._recover_previous_bundle(final_dir)
+
+            for directory in (lookalike, unowned_uuid):
+                self.assertEqual(
+                    "user content",
+                    (directory / "do-not-delete.txt").read_text(encoding="utf-8"),
+                )
 
     def test_shared_results_root_distinguishes_duplicate_basenames(self):
         image, _ = make_fixture(filled=(1, 5, 9))
@@ -324,6 +403,47 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertTrue(
                 all(Path(cell["crop_path"]).is_absolute() for cell in result["cells"])
             )
+
+    def test_zip_metadata_uses_portable_crop_references(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "private-results"
+            extracted_root = root / "extracted"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            result = analyze_image(
+                source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            self.assertTrue(
+                all(Path(cell["crop_path"]).is_absolute() for cell in result["cells"])
+            )
+
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                archive.extractall(extracted_root)
+                names = archive.namelist()
+            json_path = extracted_root / next(
+                name for name in names if name.endswith("_results.json")
+            )
+            csv_path = extracted_root / next(
+                name for name in names if name.endswith("_results.csv")
+            )
+            json_text = json_path.read_text(encoding="utf-8")
+            csv_text = csv_path.read_text(encoding="utf-8")
+            self.assertNotIn(str(results_root.resolve()), json_text)
+            self.assertNotIn(str(results_root.resolve()), csv_text)
+
+            payload = json.loads(json_text)
+            with csv_path.open(newline="", encoding="utf-8") as results_file:
+                rows = list(csv.DictReader(results_file))
+            for crop_file in [cell["crop_file"] for cell in payload["cells"]] + [
+                row["crop_file"] for row in rows
+            ]:
+                reference = Path(crop_file)
+                self.assertFalse(reference.is_absolute())
+                self.assertNotIn("..", reference.parts)
+                self.assertTrue((extracted_root / reference).is_file())
 
 
 class AnalysisSettingsTests(unittest.TestCase):

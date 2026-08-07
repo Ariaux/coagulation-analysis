@@ -32,6 +32,9 @@ DEEP_RED_RGB = (126, 16, 36)
 PALETTE_VERSION = "publication-blue-red-v1"
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 MEASUREMENT_METHOD = "ImageJ-equivalent inverted 8-bit grayscale mean"
+TRANSACTION_MARKER_NAME = ".analysis-transaction.json"
+TRANSACTION_KIND = "coagulation-analysis-result"
+TRANSACTION_VERSION = 1
 _PUBLICATION_LOCKS: dict[Path, threading.Lock] = {}
 _PUBLICATION_LOCKS_GUARD = threading.Lock()
 
@@ -326,8 +329,14 @@ def _csv_header() -> list[str]:
         "final_x2",
         "final_y2",
         "inset_percent",
-        "crop_path",
+        "crop_file",
     ]
+
+
+def _durable_cell(cell: CellResult) -> CellResult:
+    durable = {key: value for key, value in cell.items() if key != "crop_path"}
+    durable["crop_file"] = Path(cell["crop_path"]).name
+    return durable
 
 
 def save_results(
@@ -342,10 +351,11 @@ def save_results(
     destination = Path(out_dir)
     csv_path = destination / f"{artifact_key}_results.csv"
     json_path = destination / f"{artifact_key}_results.json"
+    durable_results = [_durable_cell(result) for result in results]
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(_csv_header())
-        for result in results:
+        for result in durable_results:
             writer.writerow(
                 [
                     result["idx"],
@@ -369,7 +379,7 @@ def save_results(
                     *result["detected_bbox"],
                     *result["final_bbox"],
                     result["inset_percent"],
-                    result["crop_path"],
+                    result["crop_file"],
                 ]
             )
 
@@ -385,7 +395,7 @@ def save_results(
             "no_clot_threshold": float(settings.no_clot_threshold),
             "palette_version": PALETTE_VERSION,
         },
-        "cells": results,
+        "cells": durable_results,
     }
     with json_path.open("w", encoding="utf-8") as json_file:
         json.dump(metadata, json_file, indent=2)
@@ -413,13 +423,76 @@ def _transaction_prefix(final_dir: Path) -> str:
     return f".{final_dir.name}.previous-"
 
 
+def _transaction_manifest(final_dir: Path) -> dict[str, str | int]:
+    return {
+        "kind": TRANSACTION_KIND,
+        "version": TRANSACTION_VERSION,
+        "target": os.fspath(final_dir.resolve()),
+    }
+
+
+def _create_transaction_root(final_dir: Path) -> Path:
+    transaction = final_dir.parent / (
+        f"{_transaction_prefix(final_dir)}{uuid.uuid4().hex}"
+    )
+    transaction.mkdir()
+    marker = transaction / TRANSACTION_MARKER_NAME
+    try:
+        with marker.open("x", encoding="utf-8") as marker_file:
+            json.dump(_transaction_manifest(final_dir), marker_file)
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+    except Exception:
+        try:
+            marker.unlink(missing_ok=True)
+            transaction.rmdir()
+        except OSError:
+            pass
+        raise
+    return transaction
+
+
+def _is_owned_transaction(transaction: Path, final_dir: Path) -> bool:
+    if transaction.parent.resolve() != final_dir.parent.resolve():
+        return False
+    if transaction.is_symlink() or not transaction.is_dir():
+        return False
+    name_pattern = re.compile(
+        rf"{re.escape(_transaction_prefix(final_dir))}[0-9a-f]{{32}}"
+    )
+    if name_pattern.fullmatch(transaction.name) is None:
+        return False
+    marker = transaction / TRANSACTION_MARKER_NAME
+    if marker.is_symlink() or not marker.is_file():
+        return False
+    try:
+        if {child.name for child in transaction.iterdir()} - {
+            TRANSACTION_MARKER_NAME,
+            "output",
+        }:
+            return False
+    except OSError:
+        return False
+    try:
+        with marker.open(encoding="utf-8") as marker_file:
+            manifest = json.load(marker_file)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return manifest == _transaction_manifest(final_dir)
+
+
+def _remove_owned_transaction(transaction: Path, final_dir: Path) -> None:
+    if _is_owned_transaction(transaction, final_dir):
+        _remove_known_directory(transaction)
+
+
 def _recover_previous_bundle(final_dir: Path) -> None:
     """Recover or discard only transaction bundles belonging to this target."""
     transactions = sorted(
         (
             path
             for path in final_dir.parent.iterdir()
-            if path.is_dir() and path.name.startswith(_transaction_prefix(final_dir))
+            if _is_owned_transaction(path, final_dir)
         ),
         key=lambda path: path.stat().st_mtime_ns,
         reverse=True,
@@ -430,10 +503,10 @@ def _recover_previous_bundle(final_dir: Path) -> None:
     if not final_dir.exists():
         for transaction in transactions:
             previous_bundle = transaction / "output"
-            if previous_bundle.is_dir():
+            if previous_bundle.is_dir() and not previous_bundle.is_symlink():
                 os.replace(previous_bundle, final_dir)
                 try:
-                    transaction.rmdir()
+                    _remove_owned_transaction(transaction, final_dir)
                 except OSError:
                     pass
                 break
@@ -441,37 +514,41 @@ def _recover_previous_bundle(final_dir: Path) -> None:
     if final_dir.exists():
         for transaction in transactions:
             try:
-                _remove_known_directory(transaction)
+                _remove_owned_transaction(transaction, final_dir)
             except OSError:
                 pass
 
 
 def _atomic_publish_bundle(staging_dir: Path, final_dir: Path) -> None:
     """Commit a complete immutable result bundle with one publication rename."""
-    backup_root = final_dir.parent / (
-        f"{_transaction_prefix(final_dir)}{uuid.uuid4().hex}"
-    )
-    backup_bundle = backup_root / "output"
+    backup_root: Path | None = None
+    backup_bundle: Path | None = None
     backup_root_created = False
     backed_up_bundle = False
     try:
         if final_dir.exists():
-            backup_root.mkdir()
+            backup_root = _create_transaction_root(final_dir)
+            backup_bundle = backup_root / "output"
             backup_root_created = True
             os.replace(final_dir, backup_bundle)
             backed_up_bundle = True
         os.replace(staging_dir, final_dir)
     except Exception as original_exception:
-        if backed_up_bundle:
+        if backed_up_bundle and backup_bundle is not None:
             try:
                 os.replace(backup_bundle, final_dir)
             except Exception as rollback_exception:
                 original_exception.add_note(
                     f"Could not restore the previous result bundle: {rollback_exception}"
                 )
-        if backup_root_created and backup_root.exists():
+        if (
+            backup_root_created
+            and backup_root is not None
+            and backup_root.exists()
+            and (backup_bundle is None or not backup_bundle.exists())
+        ):
             try:
-                backup_root.rmdir()
+                _remove_owned_transaction(backup_root, final_dir)
             except OSError as cleanup_exception:
                 original_exception.add_note(
                     f"Could not remove transaction directory: {cleanup_exception}"
@@ -481,9 +558,9 @@ def _atomic_publish_bundle(staging_dir: Path, final_dir: Path) -> None:
     # The single rename above publishes the directory and its ZIP together.
     # Deleting the prior bundle is an irrevocable post-commit cleanup, so a
     # partial cleanup failure must leave the new complete bundle authoritative.
-    if backup_root_created:
+    if backup_root_created and backup_root is not None:
         try:
-            _remove_known_directory(backup_root)
+            _remove_owned_transaction(backup_root, final_dir)
         except Exception:
             pass
 
