@@ -121,7 +121,8 @@ class StandalonePipelineTests(unittest.TestCase):
 
             final_dir = os.path.join(
                 temp_dir,
-                app_standalone._artifact_key("write-failure.png") + "_analysis",
+                app_standalone._artifact_key("write-failure.png", image_path)
+                + "_analysis",
             )
             self.assertFalse(os.path.exists(final_dir))
             self.assertFalse(
@@ -219,6 +220,7 @@ class StandalonePipelineTests(unittest.TestCase):
                     "final_x2",
                     "final_y2",
                     "inset_percent",
+                    "crop_path",
                 ],
                 list(rows[0]),
             )

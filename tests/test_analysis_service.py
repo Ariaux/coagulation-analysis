@@ -1,13 +1,16 @@
 import csv
 import json
+import os
 import shutil
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
 import cv2
+import numpy as np
 
 import analysis_service
 import grid_detector
@@ -38,6 +41,9 @@ class SingleImageServiceTests(unittest.TestCase):
 
             self.assertEqual(9, len(result["cells"]))
             self.assertTrue(Path(result["zip_path"]).is_file())
+            self.assertEqual(
+                Path(result["output_dir"]), Path(result["zip_path"]).parent
+            )
             for cell in result["cells"]:
                 detected_x1, detected_y1, detected_x2, detected_y2 = cell[
                     "detected_bbox"
@@ -47,6 +53,10 @@ class SingleImageServiceTests(unittest.TestCase):
                 self.assertGreater(final_y1, detected_y1)
                 self.assertLess(final_x2, detected_x2)
                 self.assertLess(final_y2, detected_y2)
+                self.assertTrue(Path(cell["crop_path"]).is_file())
+                self.assertEqual(
+                    Path(result["output_dir"]), Path(cell["crop_path"]).parent
+                )
 
             with Path(result["json_path"]).open(encoding="utf-8") as results_file:
                 payload = json.load(results_file)
@@ -61,6 +71,10 @@ class SingleImageServiceTests(unittest.TestCase):
                 "publication-blue-red-v1",
                 payload["settings"]["palette_version"],
             )
+            self.assertEqual(
+                [cell["crop_path"] for cell in result["cells"]],
+                [cell["crop_path"] for cell in payload["cells"]],
+            )
 
             with Path(result["csv_path"]).open(
                 newline="", encoding="utf-8"
@@ -69,8 +83,9 @@ class SingleImageServiceTests(unittest.TestCase):
             self.assertEqual(9, len(rows))
             self.assertIn("final_x1", rows[0])
             self.assertEqual("5.0", rows[0]["inset_percent"])
+            self.assertEqual(result["cells"][0]["crop_path"], rows[0]["crop_path"])
 
-    def test_precommit_zip_publish_failure_restores_the_prior_complete_result(self):
+    def test_precommit_bundle_publish_failure_restores_the_prior_complete_result(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -86,24 +101,22 @@ class SingleImageServiceTests(unittest.TestCase):
 
             real_replace = analysis_service.os.replace
 
-            def fail_staging_zip_publish(source_path, destination_path):
+            def fail_staging_bundle_publish(source_path, destination_path):
                 source_path = Path(source_path)
                 destination_path = Path(destination_path)
-                if (
-                    "_staging_" in source_path.name
-                    and source_path.suffix == ".zip"
-                    and destination_path == Path(prior["zip_path"])
+                if "_staging_" in source_path.name and destination_path == Path(
+                    prior["output_dir"]
                 ):
-                    raise OSError("simulated precommit ZIP publish failure")
+                    raise OSError("simulated precommit bundle publish failure")
                 return real_replace(source_path, destination_path)
 
             with mock.patch.object(
                 analysis_service.os,
                 "replace",
-                side_effect=fail_staging_zip_publish,
+                side_effect=fail_staging_bundle_publish,
             ):
                 with self.assertRaisesRegex(
-                    OSError, "simulated precommit ZIP publish failure"
+                    OSError, "simulated precommit bundle publish failure"
                 ):
                     analyze_image(
                         source,
@@ -190,18 +203,126 @@ class SingleImageServiceTests(unittest.TestCase):
             )
 
             transactions = [
-                path
-                for path in results_root.iterdir()
-                if path.name.startswith(".analysis.previous-")
+                path for path in results_root.iterdir() if ".previous-" in path.name
             ]
             self.assertEqual(1, len(transactions))
             for transaction in transactions:
                 real_remove_directory(transaction)
             self.assertFalse(
-                any(
-                    path.name.startswith(".analysis.previous-")
-                    for path in results_root.iterdir()
+                any(".previous-" in path.name for path in results_root.iterdir())
+            )
+
+    def test_stranded_previous_transaction_is_recovered(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            prior = analyze_image(
+                source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            final_dir = Path(prior["output_dir"])
+            transaction = final_dir.parent / f".{final_dir.name}.previous-stranded"
+            transaction.mkdir()
+            os.replace(final_dir, transaction / "output")
+            self.assertFalse(final_dir.exists())
+
+            analysis_service._recover_previous_bundle(final_dir)
+
+            self.assertTrue(Path(prior["json_path"]).is_file())
+            self.assertTrue(Path(prior["zip_path"]).is_file())
+            self.assertFalse(transaction.exists())
+
+    def test_shared_results_root_distinguishes_duplicate_basenames(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_source = root / "first" / "fixture.png"
+            second_source = root / "second" / "fixture.png"
+            results_root = root / "results"
+            first_source.parent.mkdir()
+            second_source.parent.mkdir()
+            self.assertTrue(cv2.imwrite(str(first_source), image))
+            self.assertTrue(cv2.imwrite(str(second_source), image))
+
+            first = analyze_image(
+                first_source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+            second = analyze_image(
+                second_source,
+                AnalysisSettings(10.0, 60.0, results_root),
+            )
+            repeated = analyze_image(
+                first_source,
+                AnalysisSettings(5.0, 60.0, results_root),
+            )
+
+            self.assertNotEqual(first["output_dir"], second["output_dir"])
+            self.assertEqual(first["output_dir"], repeated["output_dir"])
+            self.assertTrue(Path(first["json_path"]).is_file())
+            self.assertTrue(Path(second["json_path"]).is_file())
+
+    def test_concurrent_same_target_publications_keep_bundle_consistent(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            results_root = root / "results"
+            self.assertTrue(cv2.imwrite(str(source), image))
+
+            def run_analysis(inset_percent):
+                return analyze_image(
+                    source,
+                    AnalysisSettings(inset_percent, 60.0, results_root),
                 )
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(run_analysis, (5.0, 10.0, 5.0, 10.0)))
+
+            self.assertEqual(1, len({result["output_dir"] for result in results}))
+            final = results[-1]
+            with Path(final["json_path"]).open(encoding="utf-8") as results_file:
+                metadata = json.load(results_file)
+            with zipfile.ZipFile(final["zip_path"]) as archive:
+                json_name = next(
+                    name
+                    for name in archive.namelist()
+                    if name.endswith("_results.json")
+                )
+                archived_metadata = json.loads(archive.read(json_name))
+            self.assertEqual(metadata["settings"], archived_metadata["settings"])
+            self.assertEqual(metadata["cells"], archived_metadata["cells"])
+
+    def test_relative_source_uses_absolute_default_artifact_paths(self):
+        image, _ = make_fixture(filled=(1, 5, 9))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "fixture.png"
+            self.assertTrue(cv2.imwrite(str(source), image))
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                result = analyze_image(Path("fixture.png"), AnalysisSettings())
+            finally:
+                os.chdir(previous_cwd)
+
+            for key in (
+                "output_dir",
+                "overlay_path",
+                "heatmap_path",
+                "csv_path",
+                "json_path",
+                "zip_path",
+            ):
+                self.assertTrue(Path(result[key]).is_absolute(), key)
+            self.assertTrue(
+                all(Path(path).is_absolute() for path in result["crop_paths"])
+            )
+            self.assertTrue(
+                all(Path(cell["crop_path"]).is_absolute() for cell in result["cells"])
             )
 
 
@@ -256,3 +377,68 @@ class PublicationPaletteTests(unittest.TestCase):
             self.assertLessEqual(abs(actual - expected), 1)
         self.assertEqual(DEEP_RED_RGB, heatmap_color_rgb(255, 60.0))
         self.assertEqual(heatmap_color_rgb(100, 60.0), heatmap_color_rgb(100, 60.0))
+
+
+class PublicationLayoutTests(unittest.TestCase):
+    def test_heatmap_legend_stays_in_header_and_handles_threshold_255(self):
+        results = [
+            {
+                "idx": idx,
+                "row": (idx - 1) // 3 + 1,
+                "col": (idx - 1) % 3 + 1,
+                "mean": 100.0,
+            }
+            for idx in range(1, 10)
+        ]
+
+        heatmap = analysis_service.heatmap_image(results, 60.0)
+        cell_color = np.array(heatmap_color_rgb(100.0, 60.0)[::-1])
+        self.assertEqual((430, 384, 3), heatmap.shape)
+        np.testing.assert_array_equal(cell_color, heatmap[405, 280])
+        np.testing.assert_array_equal(
+            np.array(NO_CLOT_BLUE_RGB[::-1]),
+            heatmap[10, 250],
+        )
+        np.testing.assert_array_equal(
+            np.array(DEEP_RED_RGB[::-1]),
+            heatmap[10, 369],
+        )
+
+        threshold_255 = analysis_service.heatmap_image(results, 255.0)
+        np.testing.assert_array_equal(
+            np.array(NO_CLOT_BLUE_RGB[::-1]),
+            threshold_255[10, 250],
+        )
+        np.testing.assert_array_equal(
+            np.array(NO_CLOT_BLUE_RGB[::-1]),
+            threshold_255[10, 369],
+        )
+
+    def test_overlay_draws_half_open_boxes_at_last_included_pixel(self):
+        image = np.zeros((30, 30, 3), dtype=np.uint8)
+        cells = [
+            {
+                "idx": 1,
+                "detected_bbox": [2, 2, 20, 20],
+                "final_bbox": [5, 5, 15, 15],
+            }
+        ]
+
+        with mock.patch.object(
+            analysis_service.cv2,
+            "rectangle",
+            wraps=analysis_service.cv2.rectangle,
+        ) as rectangle, mock.patch.object(
+            analysis_service.cv2,
+            "line",
+            wraps=analysis_service.cv2.line,
+        ) as line:
+            analysis_service.draw_detection_overlay(image, cells)
+
+        self.assertEqual((5, 5), rectangle.call_args.args[1])
+        self.assertEqual((14, 14), rectangle.call_args.args[2])
+        for line_call in line.call_args_list:
+            start, end = line_call.args[1:3]
+            for x, y in (start, end):
+                self.assertLessEqual(x, 19)
+                self.assertLessEqual(y, 19)

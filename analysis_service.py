@@ -9,11 +9,12 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TypeAlias
+from typing import Any, TypeAlias
 
 import cv2
 import numpy as np
@@ -22,6 +23,7 @@ from grid_detector import DetectionError, GridDetection, detect_inner_squares
 
 
 BBox: TypeAlias = tuple[int, int, int, int]
+CellResult: TypeAlias = dict[str, Any]
 MIN_FINAL_CROP_SIDE = 32
 NO_CLOT_BLUE_RGB = (63, 120, 181)
 LIGHT_RED_RGB = (246, 210, 207)
@@ -30,6 +32,8 @@ DEEP_RED_RGB = (126, 16, 36)
 PALETTE_VERSION = "publication-blue-red-v1"
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 MEASUREMENT_METHOD = "ImageJ-equivalent inverted 8-bit grayscale mean"
+_PUBLICATION_LOCKS: dict[Path, threading.Lock] = {}
+_PUBLICATION_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -137,13 +141,23 @@ def measure(inverted: np.ndarray) -> dict[str, float | int]:
     }
 
 
-def _artifact_key(filename: str) -> str:
+def _artifact_key(filename: str, source_path: str | Path | None = None) -> str:
     stem, extension = os.path.splitext(filename)
     readable = "_".join(part for part in (stem, extension.lstrip(".")) if part)
     readable = re.sub(r"[^\w-]+", "_", readable, flags=re.UNICODE).strip("_")
     readable = readable[:80] or "image"
-    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()[:10]
+    if source_path is None:
+        digest_input = filename
+    else:
+        identity = os.path.normcase(os.fspath(Path(source_path).resolve()))
+        digest_input = f"{filename}\0{identity}"
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:10]
     return f"{readable}_{digest}"
+
+
+def _publication_lock(target: Path) -> threading.Lock:
+    with _PUBLICATION_LOCKS_GUARD:
+        return _PUBLICATION_LOCKS.setdefault(target, threading.Lock())
 
 
 def _draw_publication_legend(canvas: np.ndarray, threshold: float) -> None:
@@ -169,11 +183,11 @@ def _draw_publication_legend(canvas: np.ndarray, threshold: float) -> None:
     for offset in range(120):
         value = threshold + (255.0 - threshold) * offset / 119.0
         rgb = heatmap_color_rgb(value, threshold)
-        canvas[405:418, 250 + offset] = rgb[::-1]
+        canvas[7:20, 250 + offset] = rgb[::-1]
     cv2.putText(
         canvas,
         "More clot",
-        (292, 399),
+        (292, 37),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.4,
         (70, 70, 70),
@@ -221,33 +235,35 @@ def _dashed_rectangle(
     dash_length: int = 10,
 ) -> None:
     left, top, right, bottom = (int(value) for value in bbox)
-    for start in range(left, right, dash_length * 2):
+    right -= 1
+    bottom -= 1
+    for start in range(left, right + 1, dash_length * 2):
         cv2.line(
             image,
             (start, top),
-            (min(start + dash_length, right), top),
+            (min(start + dash_length - 1, right), top),
             color,
             thickness,
         )
         cv2.line(
             image,
             (start, bottom),
-            (min(start + dash_length, right), bottom),
+            (min(start + dash_length - 1, right), bottom),
             color,
             thickness,
         )
-    for start in range(top, bottom, dash_length * 2):
+    for start in range(top, bottom + 1, dash_length * 2):
         cv2.line(
             image,
             (left, start),
-            (left, min(start + dash_length, bottom)),
+            (left, min(start + dash_length - 1, bottom)),
             color,
             thickness,
         )
         cv2.line(
             image,
             (right, start),
-            (right, min(start + dash_length, bottom)),
+            (right, min(start + dash_length - 1, bottom)),
             color,
             thickness,
         )
@@ -262,7 +278,7 @@ def draw_detection_overlay(
     for cell in cells:
         _dashed_rectangle(overlay, cell["detected_bbox"], (255, 255, 0))
         x1, y1, x2, y2 = (int(value) for value in cell["final_bbox"])
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.rectangle(overlay, (x1, y1), (x2 - 1, y2 - 1), (0, 0, 255), 2)
         cv2.putText(
             overlay,
             f"#{cell['idx']}",
@@ -310,6 +326,7 @@ def _csv_header() -> list[str]:
         "final_x2",
         "final_y2",
         "inset_percent",
+        "crop_path",
     ]
 
 
@@ -352,6 +369,7 @@ def save_results(
                     *result["detected_bbox"],
                     *result["final_bbox"],
                     result["inset_percent"],
+                    result["crop_path"],
                 ]
             )
 
@@ -391,78 +409,78 @@ def _remove_known_file(path: Path) -> None:
         path.unlink()
 
 
-def _atomic_publish(
-    staging_dir: Path,
-    staging_zip: Path,
-    final_dir: Path,
-    final_zip: Path,
-) -> None:
-    token = uuid.uuid4().hex
-    backup_root = final_dir.parent / f".analysis.previous-{token}"
-    backup_dir = backup_root / "output"
-    backup_zip = backup_root / "archive.zip"
+def _transaction_prefix(final_dir: Path) -> str:
+    return f".{final_dir.name}.previous-"
+
+
+def _recover_previous_bundle(final_dir: Path) -> None:
+    """Recover or discard only transaction bundles belonging to this target."""
+    transactions = sorted(
+        (
+            path
+            for path in final_dir.parent.iterdir()
+            if path.is_dir() and path.name.startswith(_transaction_prefix(final_dir))
+        ),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    if not transactions:
+        return
+
+    if not final_dir.exists():
+        for transaction in transactions:
+            previous_bundle = transaction / "output"
+            if previous_bundle.is_dir():
+                os.replace(previous_bundle, final_dir)
+                try:
+                    transaction.rmdir()
+                except OSError:
+                    pass
+                break
+
+    if final_dir.exists():
+        for transaction in transactions:
+            try:
+                _remove_known_directory(transaction)
+            except OSError:
+                pass
+
+
+def _atomic_publish_bundle(staging_dir: Path, final_dir: Path) -> None:
+    """Commit a complete immutable result bundle with one publication rename."""
+    backup_root = final_dir.parent / (
+        f"{_transaction_prefix(final_dir)}{uuid.uuid4().hex}"
+    )
+    backup_bundle = backup_root / "output"
     backup_root_created = False
-    backed_up_dir = False
-    backed_up_zip = False
-    published_dir = False
-    published_zip = False
+    backed_up_bundle = False
     try:
-        if final_dir.exists() or final_zip.exists():
+        if final_dir.exists():
             backup_root.mkdir()
             backup_root_created = True
-        if final_dir.exists():
-            os.replace(final_dir, backup_dir)
-            backed_up_dir = True
-        if final_zip.exists():
-            os.replace(final_zip, backup_zip)
-            backed_up_zip = True
+            os.replace(final_dir, backup_bundle)
+            backed_up_bundle = True
         os.replace(staging_dir, final_dir)
-        published_dir = True
-        os.replace(staging_zip, final_zip)
-        published_zip = True
     except Exception as original_exception:
-        rollback_errors: list[tuple[str, Exception]] = []
-
-        def attempt_rollback(label: str, operation: Callable[[], None]) -> None:
+        if backed_up_bundle:
             try:
-                operation()
+                os.replace(backup_bundle, final_dir)
             except Exception as rollback_exception:
-                rollback_errors.append((label, rollback_exception))
-
-        if published_zip:
-            attempt_rollback(
-                "move the new ZIP back to staging",
-                lambda: os.replace(final_zip, staging_zip),
-            )
-        if published_dir:
-            attempt_rollback(
-                "move the new output directory back to staging",
-                lambda: os.replace(final_dir, staging_dir),
-            )
-        if backed_up_dir:
-            attempt_rollback(
-                "restore the previous output directory",
-                lambda: os.replace(backup_dir, final_dir),
-            )
-        if backed_up_zip:
-            attempt_rollback(
-                "restore the previous ZIP",
-                lambda: os.replace(backup_zip, final_zip),
-            )
+                original_exception.add_note(
+                    f"Could not restore the previous result bundle: {rollback_exception}"
+                )
         if backup_root_created and backup_root.exists():
-            attempt_rollback(
-                "remove the empty transaction directory",
-                backup_root.rmdir,
-            )
-        for label, rollback_exception in rollback_errors:
-            original_exception.add_note(f"Could not {label}: {rollback_exception}")
+            try:
+                backup_root.rmdir()
+            except OSError as cleanup_exception:
+                original_exception.add_note(
+                    f"Could not remove transaction directory: {cleanup_exception}"
+                )
         raise
 
-    # Both new artifacts are now the complete publication. Deleting the only
-    # prior copy is the irrevocable commit point, so cleanup after this point is
-    # best-effort and must never trigger rollback of the new result. Any remnant
-    # is confined to this uniquely named transaction directory and can be
-    # removed safely by a later cleanup attempt.
+    # The single rename above publishes the directory and its ZIP together.
+    # Deleting the prior bundle is an irrevocable post-commit cleanup, so a
+    # partial cleanup failure must leave the new complete bundle authoritative.
     if backup_root_created:
         try:
             _remove_known_directory(backup_root)
@@ -477,21 +495,44 @@ def _publish_analysis(
     settings: AnalysisSettings,
 ) -> dict[str, Any]:
     results_root = (
-        Path(settings.results_root)
+        Path(settings.results_root).expanduser().resolve()
         if settings.results_root is not None
         else source.parent
     )
     results_root.mkdir(parents=True, exist_ok=True)
-    artifact_key = _artifact_key(source.name)
+    artifact_key = _artifact_key(source.name, source)
     final_dir = results_root / f"{artifact_key}_analysis"
-    final_zip = results_root / f"{artifact_key}_analysis.zip"
+    with _publication_lock(final_dir):
+        _recover_previous_bundle(final_dir)
+        return _publish_analysis_locked(
+            source,
+            image,
+            detection,
+            settings,
+            results_root,
+            artifact_key,
+            final_dir,
+        )
+
+
+def _publish_analysis_locked(
+    source: Path,
+    image: np.ndarray,
+    detection: GridDetection,
+    settings: AnalysisSettings,
+    results_root: Path,
+    artifact_key: str,
+    final_dir: Path,
+) -> dict[str, Any]:
+    zip_name = f"{artifact_key}_analysis.zip"
+    final_zip = final_dir / zip_name
     staging_dir = Path(
         tempfile.mkdtemp(prefix=f".{artifact_key}_staging_", dir=results_root)
     )
     staging_zip = staging_dir.with_suffix(".zip")
 
     try:
-        cell_crops: list[tuple[dict[str, Any], np.ndarray]] = []
+        cell_crops: list[tuple[CellResult, np.ndarray]] = []
         for detected_cell in detection.squares:
             detected_bbox = tuple(detected_cell.source_bbox)
             final_bbox = inset_bbox(detected_bbox, settings.inset_percent)
@@ -503,7 +544,8 @@ def _publish_analysis(
                     "with the full grid in frame."
                 )
             inverted = 255 - to_8bit(crop)
-            cell = {
+            crop_name = f"cell_{detected_cell.idx:02d}.png"
+            cell: CellResult = {
                 "idx": detected_cell.idx,
                 "row": detected_cell.row,
                 "col": detected_cell.col,
@@ -512,6 +554,7 @@ def _publish_analysis(
                 "detected_bbox": list(detected_bbox),
                 "final_bbox": list(final_bbox),
                 "inset_percent": float(settings.inset_percent),
+                "crop_path": str(final_dir / crop_name),
                 **measure(inverted),
             }
             # Keep the desktop CSV/JSON audit aliases for existing consumers.
@@ -522,7 +565,7 @@ def _publish_analysis(
         cells = [cell for cell, _crop in cell_crops]
         crop_names: list[str] = []
         for cell, crop in cell_crops:
-            crop_name = f"cell_{cell['idx']:02d}.png"
+            crop_name = Path(cell["crop_path"]).name
             crop_path = staging_dir / crop_name
             if not _write_image(crop_path, crop):
                 raise OSError(f"Could not write crop: {crop_path}")
@@ -547,7 +590,8 @@ def _publish_analysis(
             detection,
         )
         _create_zip(staging_dir, staging_zip)
-        _atomic_publish(staging_dir, staging_zip, final_dir, final_zip)
+        os.replace(staging_zip, staging_dir / zip_name)
+        _atomic_publish_bundle(staging_dir, final_dir)
     except Exception as original_exception:
         for label, path, cleanup in (
             ("staging directory", staging_dir, _remove_known_directory),
@@ -584,7 +628,7 @@ def analyze_image(
 ) -> dict[str, Any]:
     """Analyze one supported image and atomically publish all artifacts."""
     settings.validate()
-    source = Path(path)
+    source = Path(path).expanduser().resolve()
     if source.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
         raise ValueError("Supported image types are PNG, JPG, JPEG, BMP, and TIFF.")
     image = load_image(source)
