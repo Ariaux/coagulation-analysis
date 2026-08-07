@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
@@ -13,6 +13,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import threading
 from typing import Any, Iterator
 
 from analysis_service import SUPPORTED_IMAGE_SUFFIXES, AnalysisSettings, analyze_image
@@ -568,11 +569,70 @@ def _same_windows_path(first: str, second: str) -> bool:
     )
 
 
+class _WindowsDirectoryLease:
+    """Own verified directory handles until Explorer has consumed the path."""
+
+    def __init__(
+        self,
+        api: _WindowsDirectoryHandleApi,
+        handles: list[object],
+        final_path: str,
+    ) -> None:
+        self.api = api
+        self.handles = handles
+        self.final_path = final_path
+        self._lock = threading.Lock()
+        self._closed = False
+        self.transferred = False
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            handles = list(reversed(self.handles))
+            self.handles.clear()
+        for handle in handles:
+            try:
+                self.api.close(handle)
+            except Exception:
+                LOGGER.exception("Could not close a Windows result-folder handle")
+
+    def hold_until_process_exit(self, process: object) -> None:
+        with self._lock:
+            if self._closed or self.transferred:
+                raise RuntimeError("Windows result-folder handle ownership is invalid.")
+            self.transferred = True
+        try:
+            waiter = threading.Thread(
+                target=_wait_for_windows_process,
+                args=(process, self),
+                name="result-folder-handle-waiter",
+                daemon=True,
+            )
+            waiter.start()
+        except Exception:
+            self.close()
+            raise
+
+
+def _wait_for_windows_process(
+    process: object,
+    lease: _WindowsDirectoryLease,
+) -> None:
+    try:
+        process.wait()
+    except Exception:
+        LOGGER.exception("Could not wait for the Windows result-folder process")
+    finally:
+        lease.close()
+
+
 @contextmanager
 def _open_windows_result_directory(
     root: Path,
     candidate: Path,
-) -> Iterator[str]:
+) -> Iterator[_WindowsDirectoryLease]:
     api = _windows_handle_api()
     root_text = ntpath.normpath(os.fspath(root))
     candidate_text = ntpath.normpath(os.fspath(candidate))
@@ -594,6 +654,7 @@ def _open_windows_result_directory(
 
     handles: list[object] = []
     final_path: str | None = None
+    lease: _WindowsDirectoryLease | None = None
     try:
         for expected_path in paths:
             handle = api.open_directory(expected_path)
@@ -608,10 +669,22 @@ def _open_windows_result_directory(
                 raise OSError("Opened result path does not match its canonical path.")
         if final_path is None:
             raise OSError("Result path is unavailable.")
-        yield final_path
+        lease = _WindowsDirectoryLease(api, handles, final_path)
+        yield lease
     finally:
-        for handle in reversed(handles):
-            api.close(handle)
+        if lease is not None:
+            if not lease.transferred:
+                lease.close()
+        else:
+            for handle in reversed(handles):
+                try:
+                    api.close(handle)
+                except Exception:
+                    LOGGER.exception("Could not close a Windows result-folder handle")
+
+
+def _posix_launch_complete(_process: object) -> None:
+    return None
 
 
 @contextmanager
@@ -619,10 +692,12 @@ def _open_stable_result_directory(
     root: Path,
     candidate: Path,
     platform: str,
-) -> Iterator[tuple[str, dict[str, Any]]]:
+) -> Iterator[
+    tuple[str, dict[str, Any], Callable[[object], None]]
+]:
     if platform == "win32":
-        with _open_windows_result_directory(root, candidate) as final_path:
-            yield final_path, {}
+        with _open_windows_result_directory(root, candidate) as lease:
+            yield lease.final_path, {}, lease.hold_until_process_exit
         return
 
     with _open_posix_result_directory(root, candidate) as handle:
@@ -630,7 +705,7 @@ def _open_stable_result_directory(
         handle_path = f"{handle_root}/{handle}"
         if not os.path.exists(handle_path):
             raise OSError("Stable directory handle path is unavailable.")
-        yield handle_path, {"pass_fds": (handle,)}
+        yield handle_path, {"pass_fds": (handle,)}, _posix_launch_complete
 
 
 def open_result_folder(path: str, results_root: str | Path) -> str:
@@ -658,7 +733,7 @@ def open_result_folder(path: str, results_root: str | Path) -> str:
             root,
             candidate,
             platform,
-        ) as (launch_path, popen_kwargs):
+        ) as (launch_path, popen_kwargs, launch_complete):
             if platform == "win32":
                 command = ["explorer", launch_path]
             elif platform == "darwin":
@@ -666,7 +741,8 @@ def open_result_folder(path: str, results_root: str | Path) -> str:
             else:
                 command = ["xdg-open", launch_path]
             try:
-                subprocess.Popen(command, **popen_kwargs)
+                process = subprocess.Popen(command, **popen_kwargs)
+                launch_complete(process)
             except (OSError, ValueError) as exception:
                 return f"Could not open result folder: {exception}"
     except (TypeError, ValueError, OSError, RuntimeError):

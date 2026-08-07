@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import logging
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path, PureWindowsPath
 from unittest import mock
@@ -450,7 +451,11 @@ class ResultFolderTests(unittest.TestCase):
                 @contextmanager
                 def stable_directory(_root, _candidate, _platform):
                     events.append("handle-open")
-                    yield launch_path, popen_kwargs
+                    yield (
+                        launch_path,
+                        popen_kwargs,
+                        lambda _process: events.append("launch-complete"),
+                    )
                     events.append("handle-closed")
 
                 def launch(command, **kwargs):
@@ -476,7 +481,12 @@ class ResultFolderTests(unittest.TestCase):
                         message,
                     )
                     self.assertEqual(
-                        ["handle-open", "popen", "handle-closed"],
+                        [
+                            "handle-open",
+                            "popen",
+                            "launch-complete",
+                            "handle-closed",
+                        ],
                         events,
                     )
 
@@ -672,6 +682,142 @@ class ResultFolderTests(unittest.TestCase):
 
         self.assertEqual("Result folder is unavailable.", message)
         popen.assert_not_called()
+
+    def test_windows_handles_remain_open_until_spawned_process_exits(self):
+        root = PureWindowsPath(r"C:\trusted\results")
+        candidate = root / "fixture_analysis"
+        api = self.FakeWindowsHandleApi()
+        process_started_waiting = threading.Event()
+        allow_process_exit = threading.Event()
+        all_handles_closed = threading.Event()
+        original_close = api.close
+
+        def record_close(handle):
+            original_close(handle)
+            if len(api.closed) == len(api.opened):
+                all_handles_closed.set()
+
+        api.close = record_close
+
+        class BlockingProcess:
+            def wait(self):
+                process_started_waiting.set()
+                if not allow_process_exit.wait(timeout=2):
+                    raise TimeoutError("test child did not receive exit signal")
+                return 0
+
+        process = BlockingProcess()
+        with mock.patch.object(
+            web_controller,
+            "_resolve_root_path",
+            return_value=root,
+        ), mock.patch.object(
+            web_controller,
+            "_resolve_candidate_path",
+            return_value=candidate,
+        ), mock.patch.object(
+            web_controller,
+            "_windows_handle_api",
+            return_value=api,
+        ), mock.patch.object(
+            web_controller.sys,
+            "platform",
+            "win32",
+        ), mock.patch.object(
+            web_controller.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            message = open_result_folder(str(candidate), str(root))
+
+        self.assertEqual("Opened result folder: fixture_analysis", message)
+        self.assertEqual([], api.closed)
+        self.assertTrue(process_started_waiting.wait(timeout=1))
+        self.assertEqual([], api.closed)
+        allow_process_exit.set()
+        self.assertTrue(all_handles_closed.wait(timeout=1))
+        self.assertEqual(list(reversed(api.opened)), api.closed)
+
+    def test_windows_handles_close_when_process_wait_raises(self):
+        root = PureWindowsPath(r"C:\trusted\results")
+        candidate = root / "fixture_analysis"
+        api = self.FakeWindowsHandleApi()
+        wait_called = threading.Event()
+        all_handles_closed = threading.Event()
+        original_close = api.close
+
+        def record_close(handle):
+            original_close(handle)
+            if len(api.closed) == len(api.opened):
+                all_handles_closed.set()
+
+        api.close = record_close
+
+        class FailingProcess:
+            def wait(self):
+                wait_called.set()
+                raise OSError("wait failed")
+
+        with mock.patch.object(
+            web_controller,
+            "_resolve_root_path",
+            return_value=root,
+        ), mock.patch.object(
+            web_controller,
+            "_resolve_candidate_path",
+            return_value=candidate,
+        ), mock.patch.object(
+            web_controller,
+            "_windows_handle_api",
+            return_value=api,
+        ), mock.patch.object(
+            web_controller.sys,
+            "platform",
+            "win32",
+        ), mock.patch.object(
+            web_controller.subprocess,
+            "Popen",
+            return_value=FailingProcess(),
+        ), mock.patch.object(logging.getLogger("web_controller"), "exception"):
+            message = open_result_folder(str(candidate), str(root))
+
+        self.assertEqual("Opened result folder: fixture_analysis", message)
+        self.assertTrue(wait_called.wait(timeout=1))
+        self.assertTrue(all_handles_closed.wait(timeout=1))
+        self.assertEqual(list(reversed(api.opened)), api.closed)
+
+    def test_windows_handles_close_if_waiter_cannot_be_created(self):
+        root = PureWindowsPath(r"C:\trusted\results")
+        candidate = root / "fixture_analysis"
+        api = self.FakeWindowsHandleApi()
+        with mock.patch.object(
+            web_controller,
+            "_resolve_root_path",
+            return_value=root,
+        ), mock.patch.object(
+            web_controller,
+            "_resolve_candidate_path",
+            return_value=candidate,
+        ), mock.patch.object(
+            web_controller,
+            "_windows_handle_api",
+            return_value=api,
+        ), mock.patch.object(
+            web_controller.sys,
+            "platform",
+            "win32",
+        ), mock.patch.object(
+            web_controller.subprocess,
+            "Popen",
+        ), mock.patch.object(
+            web_controller.threading,
+            "Thread",
+            side_effect=RuntimeError("thread unavailable"),
+        ):
+            message = open_result_folder(str(candidate), str(root))
+
+        self.assertEqual("Result folder is unavailable.", message)
+        self.assertEqual(list(reversed(api.opened)), api.closed)
 
     def test_swap_to_symlink_between_resolve_and_open_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
