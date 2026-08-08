@@ -7,6 +7,11 @@ import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
+BUILD_REQUIREMENTS_PATH = PROJECT_ROOT / "requirements-build.in"
+LOCK_PATHS = {
+    "Windows": PROJECT_ROOT / "requirements-windows.lock",
+    "macOS": PROJECT_ROOT / "requirements-macos.lock",
+}
 WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "build.yml"
 ACTION_REVISIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -61,6 +66,37 @@ class RuntimeDependencyTests(unittest.TestCase):
         for deep_learning_package in ("torch", "torchvision", "timm"):
             self.assertNotIn(deep_learning_package, package_names)
 
+    def test_packaging_locks_are_platform_specific_exact_and_hashed(self):
+        build_requirements = BUILD_REQUIREMENTS_PATH.read_text(encoding="utf-8")
+        self.assertIn("-r requirements.txt", build_requirements)
+        self.assertIn("pyinstaller==6.21.0", build_requirements)
+        self.assertIn("matplotlib==3.11.1", build_requirements)
+
+        locks = {
+            platform: path.read_text(encoding="utf-8")
+            for platform, path in LOCK_PATHS.items()
+        }
+        for platform, lock in locks.items():
+            with self.subTest(platform=platform):
+                self.assertIn("--hash=sha256:", lock)
+                for required_pin in (
+                    "gradio==6.16.0",
+                    "pyinstaller==6.21.0",
+                    "matplotlib==3.11.1",
+                    "pyinstaller-hooks-contrib==2026.6",
+                ):
+                    self.assertIn(required_pin, lock)
+                for line in lock.splitlines():
+                    if line and not line[0].isspace() and not line.startswith("#"):
+                        self.assertRegex(line, r"^[a-z0-9_.-]+==\S+ \\$")
+        self.assertIn("pywin32-ctypes==0.2.3", locks["Windows"])
+        self.assertIn("--python-platform x86_64-pc-windows-msvc", locks["Windows"])
+        self.assertNotIn("macholib==", locks["Windows"])
+        self.assertIn("macholib==1.16.4", locks["macOS"])
+        self.assertIn("--python-platform aarch64-apple-darwin", locks["macOS"])
+        self.assertNotIn("pywin32-ctypes==", locks["macOS"])
+        self.assertNotEqual(locks["Windows"], locks["macOS"])
+
     def test_installed_runtime_matches_supported_versions(self):
         for module_name in ("gradio", "cv2", "numpy"):
             with self.subTest(module=module_name):
@@ -88,28 +124,27 @@ class BuildWorkflowTests(unittest.TestCase):
             self.workflow,
             "      - name: Install runtime and packaging dependencies",
         )
-        research_install_step = _yaml_block(
-            self.workflow,
-            "      - name: Install research test dependency",
-        )
         test_step = _yaml_block(self.workflow, "      - name: Run tests")
-        self.assertRegex(
-            build_job,
-            r"os:\s*\[windows-2022,\s*macos-14\]",
-        )
+        self.assertIn("os: windows-2022", build_job)
+        self.assertIn("lock: requirements-windows.lock", build_job)
+        self.assertIn("os: macos-14", build_job)
+        self.assertIn("lock: requirements-macos.lock", build_job)
         self.assertIn(
-            'python -m pip install -r requirements.txt "pyinstaller==6.21.0"',
+            'python -m pip install --require-hashes -r "${{ matrix.lock }}"',
             install_step,
-        )
-        self.assertIn(
-            'python -m pip install "matplotlib==3.11.1"',
-            research_install_step,
         )
         self.assertIn(
             "python -m unittest discover -s tests -v",
             test_step,
         )
-        for duplicate in ("gradio", "opencv-python", "numpy", "matplotlib"):
+        for duplicate in (
+            "requirements.txt",
+            "pyinstaller==",
+            "gradio",
+            "opencv-python",
+            "numpy",
+            "matplotlib",
+        ):
             self.assertNotIn(duplicate, install_step)
 
     def test_compiles_every_shipped_python_module(self):
