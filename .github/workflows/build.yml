@@ -4,24 +4,35 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: coagulation-release-main
+  cancel-in-progress: true
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-2022, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
       - name: Install runtime and packaging dependencies
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: python -m pip install -r requirements.txt "pyinstaller==6.21.0"
 
       - name: Install research test dependency
-        run: python -m pip install "matplotlib>=3.9,<4"
+        run: python -m pip install "matplotlib==3.11.1"
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
@@ -40,10 +51,18 @@ jobs:
           research/annotate_inner_squares.py
           research/evaluate_cropping.py
 
+      - name: Remove research-only dependency before packaging
+        run: |
+          python -m pip uninstall --yes matplotlib
+          python -c "from importlib.util import find_spec; assert find_spec('matplotlib') is None"
+
+      - name: Record packaging environment
+        run: python -m pip freeze --all > build-manifest.txt
+
       - name: Build Windows offline website
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pyinstaller --clean --noconfirm --onedir --collect-all gradio --add-data "web_styles.css;." --name StartWebsite web_launcher.py
+        run: pyinstaller --clean --noconfirm --onedir --collect-all gradio --collect-data safehttpx --collect-data groovy --add-data "web_styles.css;." --name StartWebsite web_launcher.py
 
       - name: Build Windows desktop app
         if: runner.os == 'Windows'
@@ -54,9 +73,24 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            0
+          )
+          try {
+            $listener.Start()
+            $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+          } finally {
+            $listener.Stop()
+          }
+          $siteUrl = "http://127.0.0.1:$port"
+          $resultsRoot = Join-Path $env:RUNNER_TEMP "packaged-results"
+          if (Test-Path $resultsRoot) {
+            Remove-Item $resultsRoot -Recurse -Force
+          }
           $process = Start-Process `
             -FilePath "dist/StartWebsite/StartWebsite.exe" `
-            -ArgumentList @("--port", "7860", "--no-browser", "--results-root", "$env:RUNNER_TEMP/results") `
+            -ArgumentList @("--port", "$port", "--no-browser", "--results-root", "$resultsRoot") `
             -PassThru
           try {
             $deadline = (Get-Date).AddSeconds(60)
@@ -68,7 +102,7 @@ jobs:
               }
               try {
                 $response = Invoke-WebRequest `
-                  -Uri "http://127.0.0.1:7860" `
+                  -Uri $siteUrl `
                   -UseBasicParsing `
                   -TimeoutSec 5
                 if ($response.StatusCode -eq 200) {
@@ -106,9 +140,77 @@ jobs:
             if ($html -match '(?i)(?:src|href)\s*=\s*["'']//') {
               throw "Packaged website response referenced a protocol-relative resource."
             }
+
+            $env:PACKAGED_SITE_URL = $siteUrl
+            $env:PACKAGED_RESULTS_ROOT = $resultsRoot
+            $env:PACKAGED_FIXTURE_PATH = Join-Path $env:RUNNER_TEMP "synthetic-fixture.png"
+            $clientScript = Join-Path $env:RUNNER_TEMP "packaged-functional-smoke.py"
+            $clientSmoke = @'
+          import os
+          from pathlib import Path
+
+          import cv2
+          from gradio_client import Client, handle_file
+
+          from tests.test_grid_detector import make_fixture
+
+
+          fixture_path = Path(os.environ["PACKAGED_FIXTURE_PATH"])
+          image, _ = make_fixture(filled=(2, 5, 8))
+          success, encoded = cv2.imencode(".png", image)
+          if not success:
+              raise RuntimeError("Could not encode the synthetic fixture.")
+          encoded.tofile(str(fixture_path))
+
+          client = Client(os.environ["PACKAGED_SITE_URL"], verbose=False)
+          client.predict(
+              handle_file(str(fixture_path)),
+              5,
+              60,
+              api_name="/lambda",
+          )
+
+          results_root = Path(os.environ["PACKAGED_RESULTS_ROOT"])
+          bundles = [path for path in results_root.iterdir() if path.is_dir()]
+          if len(bundles) != 1:
+              raise AssertionError(f"Expected one analysis bundle, found {bundles}.")
+          bundle = bundles[0]
+          cell_files = sorted(bundle.glob("cell_*.png"))
+          if len(cell_files) != 9:
+              raise AssertionError(f"Expected nine cell PNGs, found {cell_files}.")
+          for pattern in (
+              "*_results.csv",
+              "*_results.json",
+              "*_grid_overlay.png",
+              "*_heatmap.png",
+              "*_analysis.zip",
+          ):
+              matches = list(bundle.glob(pattern))
+              if len(matches) != 1:
+                  raise AssertionError(
+                      f"Expected one {pattern} artifact, found {matches}."
+                  )
+          '@
+            Set-Content -LiteralPath $clientScript -Value $clientSmoke -Encoding utf8
+            $pythonExecutable = (Get-Command python).Source
+            $clientProcess = Start-Process `
+              -FilePath $pythonExecutable `
+              -ArgumentList @($clientScript) `
+              -NoNewWindow `
+              -PassThru
+            if (-not $clientProcess.WaitForExit(60000)) {
+              & taskkill.exe /PID $clientProcess.Id /T /F | Out-Null
+              throw "Packaged website functional analysis smoke timed out."
+            }
+            if ($clientProcess.ExitCode -ne 0) {
+              throw "Packaged website functional analysis smoke failed."
+            }
           } finally {
             if ($null -ne $process -and -not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force
+              & taskkill.exe /PID $process.Id /T /F | Out-Null
+              if (-not $process.WaitForExit(10000)) {
+                throw "Could not terminate the packaged website process tree."
+              }
             }
           }
 
@@ -128,6 +230,7 @@ jobs:
           Copy-Item -Path "dist/StartWebsite/*" -Destination "$releaseRoot/Web" -Recurse -Force
           Copy-Item -Path "dist/CoagulationAnalysis/*" -Destination "$releaseRoot/Desktop" -Recurse -Force
           Copy-Item README.md "$releaseRoot/README.md"
+          Copy-Item build-manifest.txt "$releaseRoot/build-manifest.txt"
 
           if (-not (Test-Path "$releaseRoot/Web/StartWebsite.exe" -PathType Leaf)) {
             throw "Windows website executable is missing from the release layout."
@@ -145,13 +248,14 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           test -f dist/CoagulationAnalysis/CoagulationAnalysis
+          cp build-manifest.txt dist/CoagulationAnalysis/build-manifest.txt
           rm -f CoagulationAnalysis-Mac.zip
           cd dist
           zip -r ../CoagulationAnalysis-Mac.zip CoagulationAnalysis
 
       - name: Upload Windows package artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-windows
           path: CoagulationAnalysis-Windows.zip
@@ -159,7 +263,7 @@ jobs:
 
       - name: Upload macOS package artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-macos
           path: CoagulationAnalysis-Mac.zip
@@ -167,22 +271,51 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
     steps:
       - name: Download platform packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: release-artifacts
           merge-multiple: true
 
+      - name: Verify build is current main head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.request import Request, urlopen
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          expected_sha = os.environ["GITHUB_SHA"]
+          request = Request(
+              f"https://api.github.com/repos/{repository}/git/ref/heads/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urlopen(request, timeout=30) as response:
+              current_sha = json.load(response)["object"]["sha"]
+          if current_sha != expected_sha:
+              raise SystemExit(
+                  f"Refusing stale release: main is {current_sha}, build is {expected_sha}."
+              )
+          PY
+
       - name: Upload platform packages to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release-artifacts/CoagulationAnalysis-Windows.zip
             release-artifacts/CoagulationAnalysis-Mac.zip
-          tag_name: latest
+          tag_name: build-${{ github.run_number }}-${{ github.run_attempt }}
           name: "Coagulation Analysis"
           body: |
             Latest offline builds for Windows and macOS.

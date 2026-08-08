@@ -8,6 +8,13 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
 WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "build.yml"
+ACTION_REVISIONS = {
+    "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
+    "actions/setup-python": "a26af69be951a213d495a4c3e4e4022e16d87065",
+    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "softprops/action-gh-release": "3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+}
 
 
 def _major_minor(version):
@@ -88,14 +95,14 @@ class BuildWorkflowTests(unittest.TestCase):
         test_step = _yaml_block(self.workflow, "      - name: Run tests")
         self.assertRegex(
             build_job,
-            r"os:\s*\[windows-latest,\s*macos-latest\]",
+            r"os:\s*\[windows-2022,\s*macos-14\]",
         )
         self.assertIn(
-            "python -m pip install -r requirements.txt pyinstaller",
+            'python -m pip install -r requirements.txt "pyinstaller==6.21.0"',
             install_step,
         )
         self.assertIn(
-            'python -m pip install "matplotlib>=3.9,<4"',
+            'python -m pip install "matplotlib==3.11.1"',
             research_install_step,
         )
         self.assertIn(
@@ -138,6 +145,7 @@ class BuildWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             'pyinstaller --clean --noconfirm --onedir --collect-all gradio '
+            '--collect-data safehttpx --collect-data groovy '
             '--add-data "web_styles.css;." --name StartWebsite web_launcher.py',
             website_step,
         )
@@ -157,10 +165,24 @@ class BuildWorkflowTests(unittest.TestCase):
         required_fragments = (
             "if: runner.os == 'Windows'",
             'dist/StartWebsite/StartWebsite.exe',
-            '"--port", "7860", "--no-browser", "--results-root"',
-            "http://127.0.0.1:7860",
+            "TcpListener",
+            '"--port", "$port", "--no-browser", "--results-root"',
+            '"http://127.0.0.1:$port"',
             "StatusCode -ne 200",
             "Coagulation Analysis",
+            "tests.test_grid_detector import make_fixture",
+            "cv2.imencode",
+            "gradio_client import Client, handle_file",
+            "client.predict",
+            'api_name="/lambda"',
+            "packaged-functional-smoke.py",
+            "$clientProcess.WaitForExit(60000)",
+            'bundle.glob("cell_*.png")',
+            '"*_results.csv"',
+            '"*_results.json"',
+            '"*_grid_overlay.png"',
+            '"*_heatmap.png"',
+            '"*_analysis.zip"',
             "$forbiddenExternalReferences",
             "src|href",
             "fonts.googleapis.com",
@@ -169,7 +191,9 @@ class BuildWorkflowTests(unittest.TestCase):
             "@import",
             "url(",
             "finally",
-            "Stop-Process",
+            "taskkill.exe",
+            "/T",
+            "/F",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
@@ -190,6 +214,7 @@ class BuildWorkflowTests(unittest.TestCase):
             'dist/StartWebsite/*',
             'dist/CoagulationAnalysis/*',
             "Copy-Item README.md",
+            "Copy-Item build-manifest.txt",
             'Web/StartWebsite.exe',
             'Desktop/CoagulationAnalysis.exe',
             "Compress-Archive",
@@ -207,18 +232,121 @@ class BuildWorkflowTests(unittest.TestCase):
             self.workflow,
             "      - name: Upload platform packages to release",
         )
-        self.assertEqual(1, self.workflow.count("softprops/action-gh-release@v2"))
-        self.assertNotIn("softprops/action-gh-release@v2", build_job)
+        release_action = (
+            "softprops/action-gh-release@"
+            + ACTION_REVISIONS["softprops/action-gh-release"]
+        )
+        self.assertEqual(1, self.workflow.count(release_action))
+        self.assertNotIn(release_action, build_job)
         self.assertIn("needs: build", release_job)
-        self.assertIn("actions/upload-artifact@v4", build_job)
-        self.assertIn("actions/download-artifact@v4", release_job)
-        self.assertIn("softprops/action-gh-release@v2", release_step)
+        self.assertIn(
+            "actions/upload-artifact@" + ACTION_REVISIONS["actions/upload-artifact"],
+            build_job,
+        )
+        self.assertIn(
+            "actions/download-artifact@"
+            + ACTION_REVISIONS["actions/download-artifact"],
+            release_job,
+        )
+        self.assertIn(release_action, release_step)
         self.assertIn("CoagulationAnalysis-Windows.zip", release_step)
         self.assertIn("CoagulationAnalysis-Mac.zip", release_step)
         self.assertIn(
             "Web/StartWebsite.exe is the recommended offline entry",
             release_step,
         )
+
+    def test_release_runs_are_serialized_and_use_immutable_latest_tags(self):
+        concurrency = _yaml_block(self.workflow, "concurrency:")
+        release_step = _yaml_block(
+            self.workflow,
+            "      - name: Upload platform packages to release",
+        )
+
+        self.assertIn("group: coagulation-release-main", concurrency)
+        self.assertIn("cancel-in-progress: true", concurrency)
+        self.assertIn(
+            "tag_name: build-${{ github.run_number }}-${{ github.run_attempt }}",
+            release_step,
+        )
+        self.assertIn("make_latest: true", release_step)
+        self.assertNotIn("tag_name: latest", release_step)
+
+    def test_release_verifies_current_main_head_before_publishing(self):
+        release_job = _yaml_block(self.workflow, "  release:")
+        current_head_step = _yaml_block(
+            self.workflow,
+            "      - name: Verify build is current main head",
+        )
+        release_step = _yaml_block(
+            self.workflow,
+            "      - name: Upload platform packages to release",
+        )
+
+        self.assertIn("api.github.com/repos", current_head_step)
+        self.assertIn("git/ref/heads/main", current_head_step)
+        self.assertIn("GITHUB_SHA", current_head_step)
+        self.assertIn("GITHUB_TOKEN", current_head_step)
+        self.assertLess(
+            release_job.index(current_head_step),
+            release_job.index(release_step),
+        )
+
+    def test_workflow_uses_least_privilege_and_immutable_action_revisions(self):
+        top_permissions = _yaml_block(self.workflow, "permissions:")
+        build_job = _yaml_block(self.workflow, "  build:")
+        release_job = _yaml_block(self.workflow, "  release:")
+        checkout_step = _yaml_block(
+            self.workflow,
+            "      - name: Checkout source",
+        )
+
+        self.assertIn("contents: read", top_permissions)
+        self.assertNotIn("contents: write", build_job)
+        self.assertIn("contents: write", release_job)
+        self.assertIn("persist-credentials: false", checkout_step)
+        self.assertIn("runs-on: ubuntu-24.04", release_job)
+        for action, revision in ACTION_REVISIONS.items():
+            with self.subTest(action=action):
+                self.assertIn(f"uses: {action}@{revision}", self.workflow)
+        for line in self.workflow.splitlines():
+            if "uses:" in line:
+                self.assertRegex(line, r"uses:\s+[\w./-]+@[0-9a-f]{40}(?:\s+#.*)?$")
+
+    def test_research_dependency_is_removed_before_packaging_and_manifested(self):
+        remove_step = _yaml_block(
+            self.workflow,
+            "      - name: Remove research-only dependency before packaging",
+        )
+        manifest_step = _yaml_block(
+            self.workflow,
+            "      - name: Record packaging environment",
+        )
+        mac_archive_step = _yaml_block(
+            self.workflow,
+            "      - name: Assemble macOS desktop archive",
+        )
+        windows_archive_step = _yaml_block(
+            self.workflow,
+            "      - name: Assemble Windows release archive",
+        )
+
+        self.assertIn("python -m pip uninstall --yes matplotlib", remove_step)
+        self.assertIn("find_spec", remove_step)
+        self.assertIn("python -m pip freeze --all > build-manifest.txt", manifest_step)
+        self.assertLess(self.workflow.index(remove_step), self.workflow.index(manifest_step))
+        for build_name in (
+            "      - name: Build Windows offline website",
+            "      - name: Build Windows desktop app",
+            "      - name: Build macOS desktop app",
+        ):
+            with self.subTest(build=build_name.strip()):
+                self.assertLess(
+                    self.workflow.index(remove_step),
+                    self.workflow.index(build_name),
+                )
+        self.assertIn("build-manifest.txt", windows_archive_step)
+        self.assertIn("build-manifest.txt", mac_archive_step)
 
 
 if __name__ == "__main__":
