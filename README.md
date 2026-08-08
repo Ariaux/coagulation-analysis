@@ -55,9 +55,81 @@ Automated coagulation assay image analysis with **classical computer vision** an
 
 ---
 
-## Quick Start
+## Windows 离线网站使用说明
 
-### 1. Install
+推荐使用网站版入口 `Web/StartWebsite.exe`。它不需安装 Python，也不需
+连接外网。下载 Windows ZIP 后必须先完整解压，正确的目录结构是：
+
+```text
+CoagulationAnalysis-Windows/
+├── Web/
+│   ├── StartWebsite.exe
+│   └── _internal/
+├── Desktop/
+│   ├── CoagulationAnalysis.exe
+│   └── _internal/
+└── README.md
+```
+
+整个 `CoagulationAnalysis-Windows` 目录必须保持完整。不要单独移动 EXE，
+不要删除或重命名 `_internal` 目录。
+
+### 启动网站
+
+1. 双击 `CoagulationAnalysis-Windows\Web\StartWebsite.exe`。
+2. 保留弹出的命令行窗口，稍等片刻，默认浏览器会自动打开本地网页。
+3. 完成分析并下载所需文件后，关闭启动器的命令行窗口即可停止网站。
+
+网页只绑定本机回环地址 `127.0.0.1`（也就是 localhost）。图片和结果只在
+当前 Windows 电脑上处理，不会上传到互联网。命令行窗口必须保持打开；
+关闭后，浏览器中的页面将停止工作。
+
+### 图片要求
+
+- 支持 PNG、JPG/JPEG、BMP 和 TIFF。
+- 图片宽度和高度都必须至少为 600 像素；例如 600×800 可以使用。
+- 从正上方正对拍摄，保持画面清晰，尽量减少反光和大角度透视。
+- 必须拍入完整的 3×3 九宫格和四条外边，不要预先裁掉外框。
+
+程序固定识别 3×3 九宫格，位置 1–9 按从左到右、从上到下编号，
+空白方格也会保留。每格先识别黑色框内最里层的正方形，再按设定向里
+内缩，避免把黑色边框算入测量区域。
+
+### 单张与批量分析
+
+- `Single Image`：选择一张完整九宫格图片，然后点击 `Analyze Image`。
+  页面会显示 9 张最终裁图、边界叠加图、热图和逐格数据，并可下载
+  CSV 和单张结果 ZIP。
+- `Batch Processing`：一次选择多张完整九宫格图片，然后点击
+  `Analyze Batch`。某张图片识别失败时，其他图片仍会继续处理。
+  `failures.csv` 会列出失败文件和原因，`batch-summary.csv` 是完整汇总，
+  `batch-results.zip` 包含成功结果和两份报告。
+
+默认 `Inner crop inset` 为 5%，表示在已识别的最里层正方形基础上再
+向内缩 5%。默认 `No-clot threshold` 为 60。如果修改这两项，应在同一组
+实验中保持一致。实际使用的内缩值和阈值会记录到结果 JSON；内缩值也会写入
+单张 CSV 的每一行，批量设置则会写入 `batch-metadata.json`，便于复现。
+
+### 热图解读
+
+- 测量值小于或等于所选阈值时，方格为固定蓝色。
+- 测量值高于所选阈值时，方格使用从浅红到深红的固定色阶。
+
+热图颜色只是选定阈值下的定量数据可视化，不是医学或临床诊断。论文或报告
+必须同时写明内缩百分比和无凝血阈值，不要仅根据颜色下结论。
+
+### 结果保存位置
+
+网站版结果默认保存在 `CoagulationAnalysis-Windows\Web\results\`。单张目录
+包含 9 张裁图、边界叠加图、热图、CSV、JSON 和结果 ZIP。批量目录包含
+每张成功图片的完整结果、汇总表、失败报告和批量 ZIP。页面中的
+`Open result folder` 或 `Open batch folder` 可直接打开对应目录。
+
+`Desktop/CoagulationAnalysis.exe` 是备用桌面入口，一次处理一张图片，不提供
+批量网页。网站无法启动时，请先确认已完整解压且 `_internal` 仍位于同一目录。
+中文和其他 Unicode 文件名可以使用。
+
+## Developer Quick Start
 
 ```bash
 cd coagulation-analysis
@@ -66,69 +138,12 @@ cd coagulation-analysis
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# Lightweight: classical CV only
-pip install opencv-python numpy gradio
+# Lightweight local website and classical CV pipeline
+pip install -r requirements.txt
 
-# Full: including deep learning
+# Optional deep-learning modules
 pip install -r requirements_dl.txt
 ```
-
-## Windows Offline App — Fixed 3x3 Fixture
-
-Download the Windows release ZIP and unzip the whole `CoagulationAnalysis`
-folder. Keep the executable and all files in that folder together. Photograph
-the complete fixed 3×3 fixture straight on, with all four outer edges visible.
-Both image dimensions must be at least 600 pixels (for example, 600×800 is
-valid).
-
-Drag the photo onto `CoagulationAnalysis.exe`. The app always detects a fixed
-3×3 fixture; there is no row or column setting. It numbers positions 1–9 in
-row-major order (left to right, then top to bottom), retains empty positions,
-and crops only the innermost square inside each cell's dark frame.
-
-The output is created beside the input photo. Its readable folder name includes
-the input stem and extension plus a short stable filename hash, so distinct
-original filenames cannot overwrite one another. Reprocessing the same exact
-filename deterministically replaces only that input's own artifacts.
-Each output folder contains:
-
-- `cell_01.png` through `cell_09.png`, including empty positions;
-- `*_grid_overlay.png`, showing detected inner-square coordinates and numbers;
-- `*_heatmap.png`, showing the 3×3 measurement heatmap;
-- `*_results.csv`, with measurements, confidence, recovery status, a half-open
-  source bounding box, and eight scalar source-quadrilateral coordinates;
-- `*_results.json`, with the same measurements and geometry.
-
-Recovery is deliberately narrow: the detector may reconstruct one globally
-unique weak inner edge from the matching boundaries in the other two row or
-column cells. Structural-divider failures, multiple weak edges, incomplete
-fixtures, and unreliable geometry stop with an actionable error before any
-final output folder or partial result set is created.
-
-The packaged app runs entirely offline and does not require Python or an
-internet connection.
-
-### Troubleshooting
-
-- **Image is rejected as too small:** both width and height must be at least
-  600 pixels.
-- **Fixture cannot be detected:** retake the photo with the complete fixture
-  and all outer edges in frame; do not crop the fixture.
-- **Strong side angle:** photograph the fixture more directly from above. The
-  detector handles small rotations, not strong perspective distortion.
-- **Reflections or blur:** reduce glare and refocus so the dark frame edges are
-  clear.
-- **App no longer starts after moving files:** restore the complete unzipped
-  folder. Do not move only `CoagulationAnalysis.exe` or delete its companion
-  files.
-- **Chinese paths:** Chinese and other Unicode file/folder names are supported.
-- **Similar filenames:** outputs are isolated by a stable hash of the exact
-  original filename, including its extension.
-- **Audit log:** `coagulation_log.txt` on the Windows Desktop records overall
-  detection confidence, outer-fixture coordinates, each cell's confidence,
-  recovery status and source bounding box, plus actionable detection failures.
-  If the Desktop log cannot be written, the console shows a `Log file
-  unavailable` warning.
 
 ## Classical CV Pipeline (Variable-Grid CLI, no GPU needed)
 
@@ -230,10 +245,10 @@ Raw Cell Image
 ```
 Phase 1: Segmentation Pre-training (10 epochs)
 ┌────────────────────────────────────┐
-│  Encoder (frozen ❄️)               │
+│  Encoder (frozen)                  │
 │       │                            │
-│       ├── Decoder (training 🔥)     │
-│       └── Seg Head (training 🔥)    │
+│       ├── Decoder (training)        │
+│       └── Seg Head (training)       │
 │                                    │
 │  Loss: Dice + BCE (segmentation)   │
 │  LR:   1e-3                        │
@@ -244,11 +259,11 @@ Phase 1: Segmentation Pre-training (10 epochs)
                 ▼
 Phase 2: Joint Multi-Task Training (50 epochs)
 ┌────────────────────────────────────┐
-│  Encoder (unfrozen 🔥)             │
+│  Encoder (unfrozen)                │
 │       │                            │
-│       ├── Decoder + Seg Head 🔥    │
-│       ├── Regression Head 🔥       │
-│       └── Classification Head 🔥   │
+│       ├── Decoder + Seg Head        │
+│       ├── Regression Head           │
+│       └── Classification Head       │
 │                                    │
 │  Loss: uncertainty-weighted        │
 │  LR:   3e-4, cosine warmup         │
@@ -349,7 +364,7 @@ coagulation-analysis/
 │
 ├── full_workflow.py           # Classical CV: interactive GUI + analysis + heatmap
 ├── analyze.py                 # Classical CV: CLI batch processing
-├── app.py                     # Gradio web interface (Hugging Face Space)
+├── app.py                     # Local offline web interface
 ├── app_standalone.py          # Fixed 3x3 offline desktop app (PyInstaller)
 ├── grid_detector.py           # Fixed-fixture and inner-square detector
 ├── imagej_workflow.ijm        # ImageJ/Fiji macro
