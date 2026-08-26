@@ -285,13 +285,13 @@ class BatchServiceTests(unittest.TestCase):
             unrelated.mkdir()
             sentinel = unrelated / "sentinel.txt"
             sentinel.write_text("preserve me", encoding="utf-8")
-            missing_target = unrelated / "missing"
             self.assertTrue(cv2.imwrite(str(source), image))
             first_name = "batch_20260807_120000_aaaaaaaa"
             second_name = "batch_20260807_120000_bbbbbbbb"
             collision = results_root / first_name
+            linked_target = Path("..") / "unrelated" / "missing"
             try:
-                collision.symlink_to(missing_target, target_is_directory=True)
+                collision.symlink_to(linked_target, target_is_directory=True)
             except OSError as exception:
                 self.skipTest(f"Directory symlinks are unavailable: {exception}")
 
@@ -314,7 +314,7 @@ class BatchServiceTests(unittest.TestCase):
 
             self.assertTrue(collision.is_symlink())
             self.assertFalse(collision.exists())
-            self.assertEqual(missing_target.resolve(), collision.resolve())
+            self.assertEqual(linked_target, collision.readlink())
             self.assertEqual("preserve me", sentinel.read_text(encoding="utf-8"))
             self.assertEqual(
                 results_root.resolve() / second_name,
