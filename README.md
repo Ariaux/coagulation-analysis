@@ -76,13 +76,15 @@ CoagulationAnalysis-Windows/
 
 ### 启动网站
 
-1. 双击 `CoagulationAnalysis-Windows\Web\StartWebsite.exe`。
-2. 保留弹出的命令行窗口，稍等片刻，默认浏览器会自动打开本地网页。
-3. 完成分析并下载所需文件后，关闭启动器的命令行窗口即可停止网站。
+1. 把手机和 Windows 电脑连接到同一个可信的私人 Wi-Fi。
+2. 双击 `CoagulationAnalysis-Windows\Web\StartWebsite.exe`。
+3. 若 Windows 防火墙询问，只允许“专用网络”，不要允许公共网络。
+4. 电脑浏览器会自动打开；手机可扫描页面二维码或输入窗口中的 Phone 地址。
+5. 保留启动器窗口。关闭窗口后，电脑和手机都会停止访问。
 
-网页只绑定本机回环地址 `127.0.0.1`（也就是 localhost）。图片和结果只在
-当前 Windows 电脑上处理，不会上传到互联网。命令行窗口必须保持打开；
-关闭后，浏览器中的页面将停止工作。
+网站没有密码。同一 Wi-Fi 中知道地址的设备都可能打开，因此不要在公共网络
+使用。手机和电脑可同时操作，所有计算及永久结果仍在 Windows 电脑完成并保存，
+图片不会上传到云端或互联网。更换 Wi-Fi 后地址可能改变，请关闭后重新启动。
 
 ### 图片要求
 
@@ -97,7 +99,8 @@ CoagulationAnalysis-Windows/
 
 ### 单张与批量分析
 
-- `Single Image`：选择一张完整九宫格图片，然后点击 `Analyze Image`。
+- `Single Image`：手机可用 `Choose from gallery or files` 从相册选择，或用
+  `Take photo` 调用后置相机直接拍摄，然后点击 `Analyze Image`。
   页面会显示 9 张最终裁图、边界叠加图、热图和逐格数据，并可下载
   CSV 和单张结果 ZIP。
 - `Batch Processing`：一次选择多张完整九宫格图片，然后点击
@@ -123,7 +126,8 @@ CoagulationAnalysis-Windows/
 网站版结果默认保存在 `CoagulationAnalysis-Windows\Web\results\`。单张目录
 包含 9 张裁图、边界叠加图、热图、CSV、JSON 和结果 ZIP。批量目录包含
 每张成功图片的完整结果、汇总表、失败报告和批量 ZIP。页面中的
-`Open result folder` 或 `Open batch folder` 可直接打开对应目录。
+`Open folder on Windows PC` 可在 Windows 主机上打开对应目录；手机端请使用
+CSV 或 ZIP 下载按钮。
 
 `Desktop/CoagulationAnalysis.exe` 是备用桌面入口，一次处理一张图片，不提供
 批量网页。网站无法启动时，请先确认已完整解压且 `_internal` 仍位于同一目录。

@@ -57,7 +57,8 @@ class RuntimeDependencyTests(unittest.TestCase):
         self.assertIn("gradio==6.16.0", requirements)
         self.assertIn("opencv-python>=4.10,<5", requirements)
         self.assertIn("numpy>=2.0,<3", requirements)
-        self.assertEqual(3, len(requirements))
+        self.assertIn("qrcode==8.2", requirements)
+        self.assertEqual(4, len(requirements))
         package_names = {
             re.match(r"^[A-Za-z0-9_.-]+", requirement).group(0).lower()
             for requirement in requirements
@@ -84,6 +85,7 @@ class RuntimeDependencyTests(unittest.TestCase):
                     "pyinstaller==6.21.0",
                     "matplotlib==3.11.1",
                     "pyinstaller-hooks-contrib==2026.6",
+                    "qrcode==8.2",
                 ):
                     self.assertIn(required_pin, lock)
                 for line in lock.splitlines():
@@ -158,6 +160,7 @@ class BuildWorkflowTests(unittest.TestCase):
             "analysis_service.py",
             "batch_service.py",
             "grid_detector.py",
+            "lan_access.py",
             "web_controller.py",
             "web_launcher.py",
             "research/__init__.py",
@@ -180,6 +183,7 @@ class BuildWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             'pyinstaller --clean --noconfirm --onedir --collect-all gradio '
+            '--collect-all qrcode '
             '--collect-data safehttpx --collect-data groovy '
             '--add-data "web_styles.css;." --name StartWebsite web_launcher.py',
             website_step,

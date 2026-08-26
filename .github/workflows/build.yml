@@ -46,6 +46,7 @@ jobs:
           analysis_service.py
           batch_service.py
           grid_detector.py
+          lan_access.py
           web_controller.py
           web_launcher.py
           research/__init__.py
@@ -63,7 +64,7 @@ jobs:
       - name: Build Windows offline website
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pyinstaller --clean --noconfirm --onedir --collect-all gradio --collect-data safehttpx --collect-data groovy --add-data "web_styles.css;." --name StartWebsite web_launcher.py
+        run: pyinstaller --clean --noconfirm --onedir --collect-all gradio --collect-all qrcode --collect-data safehttpx --collect-data groovy --add-data "web_styles.css;." --name StartWebsite web_launcher.py
 
       - name: Build Windows desktop app
         if: runner.os == 'Windows'
