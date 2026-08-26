@@ -364,6 +364,14 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIn("min-width: 0 !important", mobile)
         self.assertIn("flex-direction: column", mobile)
 
+    def test_single_analysis_has_stable_api_name(self):
+        config = self.make_config()
+        api_names = {
+            dependency.get("api_name")
+            for dependency in config["dependencies"]
+        }
+        self.assertIn("analyze_single", api_names)
+
     def test_application_is_offline_and_includes_local_styles(self):
         config = self.make_config()
 

@@ -492,6 +492,7 @@ def _build_single_tab(root: Path) -> None:
         ),
         [gallery_source, camera_source, inset, threshold],
         [crops, overlay, heatmap, table, csv_file, zip_file, result_dir, status],
+        api_name="analyze_single",
     )
     open_folder.click(
         lambda path: open_result_folder(path, root),
