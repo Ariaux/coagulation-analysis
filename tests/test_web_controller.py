@@ -17,6 +17,7 @@ from gradio import routes as gradio_routes
 
 import app as web_app
 from app import create_app
+from lan_access import LanAccessInfo
 from tests.test_grid_detector import make_fixture
 import web_controller
 from web_controller import (
@@ -106,6 +107,36 @@ class WebApplicationTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 self.assertIn(label, serialized)
+
+    def test_connection_panel_contains_private_url_and_local_qr(self):
+        access = LanAccessInfo(
+            loopback_url="http://127.0.0.1:7860",
+            phone_urls=("http://192.168.1.44:7860",),
+            preferred_url="http://192.168.1.44:7860",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(Path(temp_dir) / "results", access)
+            config = application.get_config_file()
+
+        serialized = str(config)
+        self.assertIn("lan-connection-panel", serialized)
+        self.assertIn("http://192.168.1.44:7860", serialized)
+        self.assertIn("trusted private Wi-Fi", serialized)
+        self.assertIn("No password", serialized)
+        self.assertIn("data:image/png;base64,", serialized)
+
+    def test_connection_panel_without_lan_has_restart_instructions_and_no_qr(self):
+        access = LanAccessInfo(
+            loopback_url="http://127.0.0.1:7860",
+            phone_urls=(),
+            preferred_url=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(Path(temp_dir) / "results", access)
+            serialized = str(application.get_config_file())
+
+        self.assertIn("Connect this PC and phone to the same Wi-Fi", serialized)
+        self.assertNotIn("data:image/png;base64,", serialized)
 
     def test_single_adapter_returns_all_controller_values_in_output_order(self):
         adapter = getattr(web_app, "_single_values", None)

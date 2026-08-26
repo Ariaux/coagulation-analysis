@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
+from html import escape
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -11,10 +14,12 @@ import threading
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import gradio as gr
+import qrcode
 from gradio import route_utils as gradio_route_utils
 from gradio import routes as gradio_routes
 from jinja2 import ChoiceLoader, DictLoader
 
+from lan_access import LanAccessInfo
 from web_controller import open_result_folder, run_batch_analysis, run_single_analysis
 
 
@@ -104,6 +109,19 @@ body {
 
 #application-title h1 {
   color: var(--navy) !important;
+}
+
+#lan-connection-panel {
+  border: 1px solid #b8c7d9;
+  border-radius: 12px;
+  background: #f6f9fc;
+  padding: 14px;
+}
+
+#lan-qr {
+  width: 168px;
+  height: 168px;
+  image-rendering: pixelated;
 }
 
 .gradio-container .block,
@@ -420,7 +438,37 @@ def _build_batch_tab(root: Path) -> None:
     )
 
 
-def create_app(results_root: str | Path) -> gr.Blocks:
+def _qr_data_url(value: str) -> str:
+    image = qrcode.make(value)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _connection_panel(access: LanAccessInfo) -> str:
+    if access.preferred_url is None:
+        return (
+            "<section><h2>Phone access unavailable</h2>"
+            "<p>Connect this PC and phone to the same Wi-Fi, then restart "
+            "StartWebsite.exe.</p></section>"
+        )
+    links = "".join(
+        f'<li><code>{escape(url)}</code></li>' for url in access.phone_urls
+    )
+    return (
+        "<section><h2>Open on your phone</h2>"
+        f'<img id="lan-qr" src="{_qr_data_url(access.preferred_url)}" '
+        'alt="Phone connection QR code">'
+        f"<ul>{links}</ul>"
+        "<p><strong>No password is enabled.</strong> Use only on a trusted "
+        "private Wi-Fi network. Restart after changing Wi-Fi.</p></section>"
+    )
+
+
+def create_app(
+    results_root: str | Path,
+    lan_access: LanAccessInfo | None = None,
+) -> gr.Blocks:
     """Build the offline analysis application without starting its server."""
     _install_offline_templates()
     root = Path(results_root)
@@ -433,6 +481,8 @@ def create_app(results_root: str | Path) -> gr.Blocks:
             "# Coagulation Analysis\nLocal and offline",
             elem_id="application-title",
         )
+        if lan_access is not None:
+            gr.HTML(_connection_panel(lan_access), elem_id="lan-connection-panel")
         with gr.Tabs():
             with gr.Tab("Single Image"):
                 _build_single_tab(root)

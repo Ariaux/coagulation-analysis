@@ -29,6 +29,19 @@ body {
   color: var(--navy) !important;
 }
 
+#lan-connection-panel {
+  border: 1px solid #b8c7d9;
+  border-radius: 12px;
+  background: #f6f9fc;
+  padding: 14px;
+}
+
+#lan-qr {
+  width: 168px;
+  height: 168px;
+  image-rendering: pixelated;
+}
+
 .gradio-container .block,
 .gradio-container .form {
   border-color: rgba(24, 42, 69, 0.16);
