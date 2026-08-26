@@ -15,6 +15,7 @@ import traceback
 import webbrowser
 
 from app import create_app
+from lan_access import discover_lan_access
 
 
 _PORT_ERROR = "Port must be between 1 and 65535."
@@ -225,13 +226,16 @@ def launch_site(
     port: int | None,
     open_browser: bool,
 ) -> None:
-    """Build and start the private loopback-only Gradio application."""
+    """Build and start the private LAN Gradio application."""
     selected_port = _validated_port(port)
+    if selected_port is None:
+        selected_port = available_loopback_port()
     root = _prepare_results_root(results_root)
-    application = create_app(root)
+    access = discover_lan_access(selected_port)
+    application = create_app(root, access)
     try:
         launch_result = application.launch(
-            server_name="127.0.0.1",
+            server_name="0.0.0.0",
             server_port=selected_port,
             share=False,
             inbrowser=False,
@@ -250,7 +254,16 @@ def launch_site(
             raise RuntimeError(
                 "The local website did not provide a browser address."
             )
-        if open_browser and not webbrowser.open(local_url):
+        _print_console(f"Computer: {access.loopback_url}")
+        for phone_url in access.phone_urls:
+            _print_console(f"Phone: {phone_url}")
+        if not access.phone_urls:
+            _print_console("Connect both devices to the same Wi-Fi, then restart.")
+        _print_console(
+            "No password is enabled. Use only on a trusted private Wi-Fi network."
+        )
+        _print_console("Close this window to stop access from both devices.")
+        if open_browser and not webbrowser.open(access.loopback_url):
             raise RuntimeError("Could not open the default browser.")
         application.block_thread()
     except Exception:

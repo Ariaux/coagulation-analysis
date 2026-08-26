@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import app
+from lan_access import LanAccessInfo
 import web_launcher
 
 
@@ -84,13 +85,22 @@ class WebLauncherPathTests(unittest.TestCase):
 
 
 class WebLauncherStartupTests(unittest.TestCase):
-    def test_launch_is_loopback_only_and_never_shared(self):
+    def test_launch_binds_lan_and_never_uses_gradio_sharing(self):
         fake_app = fake_application()
+        access = LanAccessInfo(
+            "http://127.0.0.1:7860",
+            ("http://192.168.1.44:7860",),
+            "http://192.168.1.44:7860",
+        )
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             web_launcher,
             "create_app",
             return_value=fake_app,
-        ) as create_app:
+        ) as create_app, mock.patch.object(
+            web_launcher,
+            "discover_lan_access",
+            return_value=access,
+        ):
             requested_root = Path(temp_dir) / "nested" / ".." / "results"
 
             web_launcher.launch_site(
@@ -100,9 +110,9 @@ class WebLauncherStartupTests(unittest.TestCase):
             )
 
             resolved_root = requested_root.resolve()
-            create_app.assert_called_once_with(resolved_root)
+            create_app.assert_called_once_with(resolved_root, access)
             fake_app.launch.assert_called_once_with(
-                server_name="127.0.0.1",
+                server_name="0.0.0.0",
                 server_port=7860,
                 share=False,
                 inbrowser=False,
@@ -114,7 +124,7 @@ class WebLauncherStartupTests(unittest.TestCase):
             fake_app.block_thread.assert_called_once_with()
             self.assertTrue(resolved_root.is_dir())
 
-    def test_launch_leaves_automatic_port_binding_to_gradio(self):
+    def test_launch_reserves_automatic_port_for_connection_metadata(self):
         fake_app = fake_application()
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             web_launcher,
@@ -131,10 +141,10 @@ class WebLauncherStartupTests(unittest.TestCase):
         ) as open_browser:
             web_launcher.launch_site(Path(temp_dir), None, True)
 
-        available_port.assert_not_called()
-        self.assertIsNone(fake_app.launch.call_args.kwargs["server_port"])
+        available_port.assert_called_once_with()
+        self.assertEqual(43123, fake_app.launch.call_args.kwargs["server_port"])
         self.assertFalse(fake_app.launch.call_args.kwargs["inbrowser"])
-        open_browser.assert_called_once_with("http://127.0.0.1:7860/")
+        open_browser.assert_called_once_with("http://127.0.0.1:43123")
         fake_app.block_thread.assert_called_once_with()
 
     def test_no_browser_never_opens_a_browser_and_blocks_normally(self):
