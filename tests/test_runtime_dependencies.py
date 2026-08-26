@@ -216,7 +216,7 @@ class BuildWorkflowTests(unittest.TestCase):
             "cv2.imencode",
             "gradio_client import Client, handle_file",
             "client.predict",
-            'api_name="/lambda"',
+            'api_name="/analyze_single"',
             "packaged-functional-smoke.py",
             "$clientProcess.WaitForExit(60000)",
             'bundle.glob("cell_*.png")',
@@ -248,6 +248,10 @@ class BuildWorkflowTests(unittest.TestCase):
         self.assertNotIn("--share", smoke_step)
         self.assertNotIn("tests.test_grid_detector", smoke_step)
         self.assertNotIn('              "http://",', smoke_step)
+        self.assertRegex(
+            smoke_step,
+            r"client\.predict\(\s+handle_file\([^\n]+\),\s+None,\s+5,\s+60,",
+        )
 
     def test_packaged_functional_smoke_client_is_self_contained_python(self):
         smoke_step = _yaml_block(

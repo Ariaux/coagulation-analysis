@@ -242,9 +242,10 @@ jobs:
           client = Client(os.environ["PACKAGED_SITE_URL"], verbose=False)
           client.predict(
               handle_file(str(fixture_path)),
+              None,
               5,
               60,
-              api_name="/lambda",
+              api_name="/analyze_single",
           )
 
           results_root = Path(os.environ["PACKAGED_RESULTS_ROOT"])
