@@ -76,6 +76,24 @@ Object.defineProperty(window.navigator, "languages", {
 });
 </script>
 """
+_MOBILE_CAPTURE_BOOTSTRAP = """\
+<script data-mobile-capture>
+function configureCameraInput() {
+  const input = document.querySelector('#camera-source input[type="file"]');
+  if (!input) return false;
+  input.setAttribute('accept', 'image/*');
+  input.setAttribute('capture', 'environment');
+  return true;
+}
+if (!configureCameraInput()) {
+  const observer = new MutationObserver(() => {
+    if (configureCameraInput()) observer.disconnect();
+  });
+  observer.observe(document.documentElement, {childList: true, subtree: true});
+  window.setTimeout(() => observer.disconnect(), 15000);
+}
+</script>
+"""
 _TEMPLATE_LOCK = threading.RLock()
 _TEMPLATE_LOADER_MARKER = "_coagulation_offline_templates"
 _CONFIG_PATCH_LOCK = threading.RLock()
@@ -155,6 +173,23 @@ body .gradio-container div.status-field.block {
 .gradio-container .status-field input {
   color: var(--navy);
   font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .gradio-container {
+    padding: 12px !important;
+  }
+
+  #lan-connection-panel,
+  #lan-connection-panel section,
+  .gradio-container img {
+    max-width: 100%;
+  }
+
+  .gradio-container .table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+  }
 }
 """
 
@@ -283,7 +318,7 @@ def _install_offline_templates() -> None:
                 )
             offline_source = _insert_before_module(
                 offline_source,
-                _ENGLISH_BOOTSTRAP,
+                _ENGLISH_BOOTSTRAP + _MOBILE_CAPTURE_BOOTSTRAP,
             )
             overrides[name] = offline_source
 
@@ -321,12 +356,29 @@ def _batch_values(paths, inset, threshold, root):
     )
 
 
+def _single_source(gallery_path, camera_path):
+    selected = [path for path in (gallery_path, camera_path) if path]
+    if not selected:
+        raise ValueError("Choose or take one image before analysis.")
+    if len(selected) != 1:
+        raise ValueError("Use only one image source at a time.")
+    return selected[0]
+
+
 def _build_single_tab(root: Path) -> None:
     with gr.Row():
         with gr.Column(scale=2):
-            source = gr.File(
-                label="Complete 3×3 fixture image",
+            gallery_source = gr.File(
+                label="Choose from gallery or files",
+                file_count="single",
                 type="filepath",
+                elem_id="gallery-source",
+            )
+            camera_source = gr.File(
+                label="Take photo",
+                file_count="single",
+                type="filepath",
+                elem_id="camera-source",
             )
             inset = gr.Slider(
                 0,
@@ -372,11 +424,16 @@ def _build_single_tab(root: Path) -> None:
         csv_file = gr.File(label="Download CSV", interactive=False)
         zip_file = gr.File(label="Download result ZIP", interactive=False)
     result_dir = gr.Textbox(label="Saved result folder", interactive=False)
-    open_folder = gr.Button("Open result folder")
+    open_folder = gr.Button("Open folder on Windows PC")
+
+    gallery_source.change(lambda: None, outputs=camera_source)
+    camera_source.change(lambda: None, outputs=gallery_source)
 
     analyze.click(
-        lambda path, value, cutoff: _single_values(path, value, cutoff, root),
-        [source, inset, threshold],
+        lambda gallery, camera, value, cutoff: _single_values(
+            _single_source(gallery, camera), value, cutoff, root
+        ),
+        [gallery_source, camera_source, inset, threshold],
         [crops, overlay, heatmap, table, csv_file, zip_file, result_dir, status],
     )
     open_folder.click(
@@ -424,7 +481,7 @@ def _build_batch_tab(root: Path) -> None:
         failures = gr.File(label="Failure report CSV", interactive=False)
         archive = gr.File(label="Download batch ZIP", interactive=False)
     batch_dir = gr.Textbox(label="Saved batch folder", interactive=False)
-    open_folder = gr.Button("Open batch folder")
+    open_folder = gr.Button("Open batch folder on Windows PC")
 
     analyze.click(
         lambda paths, value, cutoff: _batch_values(paths, value, cutoff, root),

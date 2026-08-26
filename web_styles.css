@@ -74,3 +74,20 @@ body .gradio-container div.status-field.block {
   color: var(--navy);
   font-weight: 600;
 }
+
+@media (max-width: 720px) {
+  .gradio-container {
+    padding: 12px !important;
+  }
+
+  #lan-connection-panel,
+  #lan-connection-panel section,
+  .gradio-container img {
+    max-width: 100%;
+  }
+
+  .gradio-container .table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

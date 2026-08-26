@@ -191,10 +191,15 @@ class WebApplicationTests(unittest.TestCase):
     def test_single_tab_components_follow_browser_contract(self):
         config = self.make_config()
 
-        source = self.one_component(config, "Complete 3×3 fixture image")
-        self.assertEqual("file", source["type"])
-        self.assertEqual("filepath", source["props"]["type"])
-        self.assertEqual("single", source["props"]["file_count"])
+        for label, elem_id in (
+            ("Choose from gallery or files", "gallery-source"),
+            ("Take photo", "camera-source"),
+        ):
+            source = self.one_component(config, label)
+            self.assertEqual("file", source["type"])
+            self.assertEqual("filepath", source["props"]["type"])
+            self.assertEqual("single", source["props"]["file_count"])
+            self.assertEqual(elem_id, source["props"]["elem_id"])
 
         gallery = self.one_component(config, "Final inner crops")
         self.assertEqual("gallery", gallery["type"])
@@ -251,7 +256,8 @@ class WebApplicationTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                "Complete 3×3 fixture image",
+                "Choose from gallery or files",
+                "Take photo",
                 "Inner crop inset",
                 "No-clot threshold",
             ],
@@ -300,13 +306,13 @@ class WebApplicationTests(unittest.TestCase):
 
         _, folder_inputs, folder_outputs = self.dependency_for_button(
             config,
-            "Open result folder",
+            "Open folder on Windows PC",
         )
         self.assertEqual(["Saved result folder"], folder_inputs)
         self.assertEqual(["Status"], folder_outputs)
         _, folder_inputs, folder_outputs = self.dependency_for_button(
             config,
-            "Open batch folder",
+            "Open batch folder on Windows PC",
         )
         self.assertEqual(["Saved batch folder"], folder_inputs)
         self.assertEqual(["Batch status"], folder_outputs)
@@ -329,6 +335,25 @@ class WebApplicationTests(unittest.TestCase):
                         props["step"],
                     ),
                 )
+
+    def test_single_source_accepts_one_input_and_rejects_ambiguous_input(self):
+        selector = getattr(web_app, "_single_source", None)
+        self.assertIsNotNone(selector)
+        self.assertEqual("gallery.png", selector("gallery.png", None))
+        self.assertEqual("camera.jpg", selector(None, "camera.jpg"))
+        with self.assertRaisesRegex(ValueError, "Choose or take"):
+            selector(None, None)
+        with self.assertRaisesRegex(ValueError, "only one"):
+            selector("gallery.png", "camera.jpg")
+
+    def test_camera_bootstrap_is_local_and_uses_native_capture(self):
+        bootstrap = getattr(web_app, "_MOBILE_CAPTURE_BOOTSTRAP", "")
+        self.assertIn("#camera-source", bootstrap)
+        self.assertIn("capture", bootstrap)
+        self.assertIn("environment", bootstrap)
+        self.assertIn("image/*", bootstrap)
+        self.assertNotIn("getUserMedia", bootstrap)
+        self.assertNotIn("https://", bootstrap)
 
     def test_application_is_offline_and_includes_local_styles(self):
         config = self.make_config()
