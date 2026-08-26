@@ -124,8 +124,6 @@ jobs:
               throw "Packaged website response did not contain the application title."
             }
             $forbiddenExternalReferences = @(
-              "http://",
-              "https://",
               "@import",
               "url(",
               "fonts.googleapis.com",
@@ -139,8 +137,39 @@ jobs:
                 throw "Packaged website response contained forbidden external reference: $reference"
               }
             }
-            if ($html -match '(?i)(?:src|href)\s*=\s*["'']//') {
+            if ($html -match '(?i)(?:src|href|action)\s*=\s*["'']https?://') {
+              throw "Packaged website response referenced an external resource."
+            }
+            if ($html -match '(?i)(?:src|href|action)\s*=\s*["'']//') {
               throw "Packaged website response referenced a protocol-relative resource."
+            }
+            $urlMatches = [regex]::Matches(
+              $html,
+              'https?://[A-Za-z0-9.\-:\[\]]+'
+            )
+            $privatePhoneUrlCount = 0
+            foreach ($urlMatch in $urlMatches) {
+              $uri = [System.Uri]$urlMatch.Value
+              $address = $null
+              if (-not [System.Net.IPAddress]::TryParse($uri.Host, [ref]$address)) {
+                throw "Packaged website response contained a non-private URL: $($urlMatch.Value)"
+              }
+              $bytes = $address.GetAddressBytes()
+              $isLoopback = $bytes.Length -eq 4 -and $bytes[0] -eq 127
+              $isPrivate = $bytes.Length -eq 4 -and (
+                $bytes[0] -eq 10 -or
+                ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+                ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+              )
+              if (-not $isLoopback -and -not $isPrivate) {
+                throw "Packaged website response contained a non-private URL: $($urlMatch.Value)"
+              }
+              if ($isPrivate) {
+                $privatePhoneUrlCount += 1
+              }
+            }
+            if ($privatePhoneUrlCount -lt 1) {
+              throw "Packaged website response did not contain a private phone URL."
             }
 
             $env:PACKAGED_SITE_URL = $siteUrl

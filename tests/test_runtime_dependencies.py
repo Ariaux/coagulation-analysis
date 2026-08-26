@@ -223,7 +223,11 @@ class BuildWorkflowTests(unittest.TestCase):
             '"*_heatmap.png"',
             '"*_analysis.zip"',
             "$forbiddenExternalReferences",
-            "src|href",
+            "$urlMatches",
+            "IPAddress",
+            "GetAddressBytes",
+            "non-private URL",
+            "src|href|action",
             "fonts.googleapis.com",
             "cdnjs.cloudflare.com",
             "cdn.jsdelivr.net",
@@ -239,6 +243,7 @@ class BuildWorkflowTests(unittest.TestCase):
                 self.assertIn(fragment, smoke_step)
         self.assertNotIn("share=True", smoke_step)
         self.assertNotIn("--share", smoke_step)
+        self.assertNotIn('              "http://",', smoke_step)
 
     def test_windows_archive_contains_complete_web_and_desktop_onedir_apps(self):
         archive_step = _yaml_block(
