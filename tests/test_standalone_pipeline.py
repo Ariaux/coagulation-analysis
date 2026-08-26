@@ -69,9 +69,9 @@ class StandalonePipelineTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with mock.patch("builtins.open", side_effect=OSError("read-only")), (
-            contextlib.redirect_stdout(stdout)
-        ), contextlib.redirect_stderr(stderr):
+        with mock.patch(
+            "builtins.open", side_effect=OSError("read-only")
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             app_standalone.log("original audit message")
 
         self.assertIn("original audit message", stdout.getvalue())
@@ -121,7 +121,8 @@ class StandalonePipelineTests(unittest.TestCase):
 
             final_dir = os.path.join(
                 temp_dir,
-                app_standalone._artifact_key("write-failure.png") + "_analysis",
+                app_standalone._artifact_key("write-failure.png", image_path)
+                + "_analysis",
             )
             self.assertFalse(os.path.exists(final_dir))
             self.assertFalse(
@@ -145,9 +146,7 @@ class StandalonePipelineTests(unittest.TestCase):
             crop_widths = []
             crop_heights = []
             for idx in range(1, 10):
-                crop_path = os.path.join(
-                    outputs["output_dir"], f"cell_{idx:02d}.png"
-                )
+                crop_path = os.path.join(outputs["output_dir"], f"cell_{idx:02d}.png")
                 self.assertTrue(os.path.exists(crop_path))
                 crop = cv2.imread(crop_path)
                 self.assertIsNotNone(crop)
@@ -173,9 +172,14 @@ class StandalonePipelineTests(unittest.TestCase):
             self.assertEqual("fixture.png", payload["image"])
             self.assertEqual("3x3", payload["grid"])
             self.assertEqual(9, len(payload["cells"]))
+            self.assertEqual("publication-blue-red-v1", outputs["palette_version"])
             self.assertIn("crop_quad", payload["cells"][0])
             self.assertEqual(4, len(payload["cells"][0]["crop_quad"]))
             self.assertIn("source_bbox", payload["cells"][0])
+            for cell in outputs["cells"]:
+                self.assertIn("detected_bbox", cell)
+                self.assertIn("final_bbox", cell)
+                self.assertEqual(5.0, cell["inset_percent"])
 
             with open(
                 outputs["csv_path"], newline="", encoding="utf-8"
@@ -207,6 +211,16 @@ class StandalonePipelineTests(unittest.TestCase):
                     "quad_3_y",
                     "quad_4_x",
                     "quad_4_y",
+                    "detected_x1",
+                    "detected_y1",
+                    "detected_x2",
+                    "detected_y2",
+                    "final_x1",
+                    "final_y1",
+                    "final_x2",
+                    "final_y2",
+                    "inset_percent",
+                    "crop_file",
                 ],
                 list(rows[0]),
             )
@@ -233,13 +247,8 @@ class StandalonePipelineTests(unittest.TestCase):
             )
 
     def test_pipeline_rejects_images_with_either_dimension_below_600(self):
-        images = [
-            make_fixture(size=size)[0]
-            for size in (180, 300, 599)
-        ]
-        images.append(
-            cv2.resize(make_fixture(size=800)[0], (800, 599))
-        )
+        images = [make_fixture(size=size)[0] for size in (180, 300, 599)]
+        images.append(cv2.resize(make_fixture(size=800)[0], (800, 599)))
         with tempfile.TemporaryDirectory() as temp_dir:
             for idx, image in enumerate(images):
                 with self.subTest(shape=image.shape):
@@ -314,42 +323,30 @@ class StandalonePipelineTests(unittest.TestCase):
             for outputs in (png_outputs, jpg_outputs):
                 self.assertTrue(os.path.exists(outputs["json_path"]))
                 self.assertTrue(
-                    os.path.exists(
-                        os.path.join(outputs["output_dir"], "cell_01.png")
-                    )
+                    os.path.exists(os.path.join(outputs["output_dir"], "cell_01.png"))
                 )
             with open(png_outputs["json_path"], encoding="utf-8") as result_file:
                 self.assertEqual("run.png", json.load(result_file)["image"])
             with open(jpg_outputs["json_path"], encoding="utf-8") as result_file:
                 self.assertEqual("run.jpg", json.load(result_file)["image"])
 
-    def test_extensionless_name_cannot_collide_with_extension_key(self):
+    def test_extensionless_name_is_rejected_as_an_unsupported_image_type(self):
         image, _ = make_fixture(filled=(1, 5, 9))
         with tempfile.TemporaryDirectory() as temp_dir:
-            jpg_path = os.path.join(temp_dir, "sample.jpg")
             extensionless_path = os.path.join(temp_dir, "sample_jpg")
-            self.assertTrue(cv2.imwrite(jpg_path, image))
             success, encoded = cv2.imencode(".png", image)
             self.assertTrue(success)
             encoded.tofile(extensionless_path)
 
-            jpg_outputs = process_image(
-                jpg_path, show_windows=False, open_folder=False
-            )
-            extensionless_outputs = process_image(
-                extensionless_path, show_windows=False, open_folder=False
-            )
-
-            self.assertNotEqual(
-                jpg_outputs["output_dir"], extensionless_outputs["output_dir"]
-            )
-            for outputs, filename in (
-                (jpg_outputs, "sample.jpg"),
-                (extensionless_outputs, "sample_jpg"),
+            with self.assertRaisesRegex(
+                ValueError,
+                "Supported image types are PNG, JPG, JPEG, BMP, and TIFF",
             ):
-                self.assertTrue(os.path.isfile(outputs["json_path"]))
-                with open(outputs["json_path"], encoding="utf-8") as result_file:
-                    self.assertEqual(filename, json.load(result_file)["image"])
+                process_image(
+                    extensionless_path,
+                    show_windows=False,
+                    open_folder=False,
+                )
 
     def test_unicode_paths_use_encoded_image_writes(self):
         image, _ = make_fixture(filled=(1, 5, 9))
@@ -374,9 +371,7 @@ class StandalonePipelineTests(unittest.TestCase):
                 )
 
             for idx in range(1, 10):
-                crop_path = os.path.join(
-                    outputs["output_dir"], f"cell_{idx:02d}.png"
-                )
+                crop_path = os.path.join(outputs["output_dir"], f"cell_{idx:02d}.png")
                 self.assertIsNotNone(load_image(crop_path))
             self.assertIsNotNone(load_image(outputs["overlay_path"]))
             self.assertIsNotNone(load_image(outputs["heatmap_path"]))

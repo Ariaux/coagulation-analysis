@@ -1,228 +1,635 @@
-#!/usr/bin/env python3
-"""
-Coagulation Quantification — Hugging Face Space
-================================================
-Automated ImageJ workflow: upload → auto-detect slide → analyze → download.
+"""Local Gradio interface for fixed nine-grid coagulation analysis."""
 
-Deployed at: https://huggingface.co/spaces/Yilunaria/coagulation-quantification
-"""
+from __future__ import annotations
+
+from base64 import b64encode
+from html import escape
+from io import BytesIO
+import os
+from pathlib import Path
+import re
+import sys
+import threading
+
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
+
 import gradio as gr
-import numpy as np
-import cv2
-import tempfile
+import qrcode
+from gradio import route_utils as gradio_route_utils
+from gradio import routes as gradio_routes
+from jinja2 import ChoiceLoader, DictLoader
+
+from lan_access import LanAccessInfo
+from web_controller import open_result_folder, run_batch_analysis, run_single_analysis
 
 
-def to_8bit_grayscale(bgr):
-    """ImageJ-equivalent 8-bit grayscale: gray = 0.299R + 0.587G + 0.114B."""
-    b, g, r = bgr[:, :, 0].astype(np.float32), \
-              bgr[:, :, 1].astype(np.float32), \
-              bgr[:, :, 2].astype(np.float32)
-    return np.clip(0.114 * b + 0.587 * g + 0.299 * r, 0, 255).astype(np.uint8)
+_SYSTEM_FONT_STACK = (
+    "ui-sans-serif",
+    "system-ui",
+    "-apple-system",
+    "BlinkMacSystemFont",
+    "Segoe UI",
+    "sans-serif",
+)
+_SYSTEM_MONO_STACK = (
+    "ui-monospace",
+    "SFMono-Regular",
+    "Consolas",
+    "monospace",
+)
+_LOCAL_THEME = gr.themes.Base(
+    font=_SYSTEM_FONT_STACK,
+    font_mono=_SYSTEM_MONO_STACK,
+).set(
+    checkbox_check="none",
+    radio_circle="none",
+)
+_TEMPLATE_NAMES = ("frontend/index.html", "frontend/share.html")
+_EXTERNAL_HEAD_TAG = re.compile(
+    r"""
+    (?is)
+    [ \t]*<(?:link|meta)\b
+    (?=[^>]*\b(?:href|content)\s*=\s*["']https?://)
+    [^>]*>\s*
+    |
+    [ \t]*<script\b
+    (?=[^>]*\bsrc\s*=\s*["']https?://)
+    [^>]*>\s*</script>\s*
+    """,
+    re.VERBOSE,
+)
+_LOCAL_ASSET_TAG = re.compile(
+    r"""(?is)<(?:script|link)\b(?=[^>]*(?:src|href)=["']\./assets/)[^>]*>"""
+    r"(?:\s*</script>)?"
+)
+_ENGLISH_BOOTSTRAP = """\
+<script data-offline-language>
+document.documentElement.lang = "en";
+window.gradio_config.root = window.location.origin;
+Object.defineProperty(window.navigator, "language", {
+  configurable: true,
+  get: () => "en-US"
+});
+Object.defineProperty(window.navigator, "languages", {
+  configurable: true,
+  get: () => ["en-US", "en"]
+});
+</script>
+"""
+_MOBILE_CAPTURE_BOOTSTRAP = """\
+<script data-mobile-capture>
+function configureCameraInput() {
+  const input = document.querySelector('#camera-source input[type="file"]');
+  if (!input) return false;
+  input.setAttribute('accept', 'image/*');
+  input.setAttribute('capture', 'environment');
+  return true;
+}
+if (!configureCameraInput()) {
+  const observer = new MutationObserver(() => {
+    if (configureCameraInput()) observer.disconnect();
+  });
+  observer.observe(document.documentElement, {childList: true, subtree: true});
+  window.setTimeout(() => observer.disconnect(), 15000);
+}
+</script>
+"""
+_MOBILE_LAYOUT_STYLE = """\
+<style data-mobile-layout>
+@media (max-width: 720px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
 
+  .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    padding: 12px !important;
+  }
 
-def auto_detect_slide(image):
-    """
-    Auto-detect the glass slide region using Otsu thresholding.
-    Returns (x, y, w, h) of the detected slide.
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
 
-    # Otsu — slide is usually brighter than background
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+  .gradio-container .row {
+    flex-direction: column;
+  }
+}
+</style>
+"""
+_TEMPLATE_LOCK = threading.RLock()
+_TEMPLATE_LOADER_MARKER = "_coagulation_offline_templates"
+_CONFIG_PATCH_LOCK = threading.RLock()
+_CONFIG_PATCH_MARKER = "_coagulation_offline_app_ids"
+_EMBEDDED_CSS = """:root {
+  --navy: #182a45;
+  --blue: #3f78b5;
+  --red: #a42e3d;
+  --surface: #ffffff;
+  --background: #f5f7fa;
+}
 
-    # If most pixels are white, slide IS the bright region
-    if np.mean(binary) / 255 < 0.5:
-        binary = cv2.bitwise_not(binary)  # flip if slide is dark
+body {
+  background: var(--background);
+}
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+.gradio-container {
+  max-width: 1440px !important;
+  margin: 0 auto;
+  padding: 24px !important;
+  color: var(--navy);
+  background: var(--background);
+}
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return 0, 0, w, h  # fallback: whole image
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3 {
+  color: var(--navy);
+  letter-spacing: -0.015em;
+}
 
-    largest = max(contours, key=cv2.contourArea)
-    x, y, sw, sh = cv2.boundingRect(largest)
+#application-title h1 {
+  color: var(--navy) !important;
+}
 
-    # Validate: slide should be > 10% of image
-    if sw > w * 0.1 and sh > h * 0.1 and cv2.contourArea(largest) > w * h * 0.05:
-        return x, y, sw, sh
-    return 0, 0, w, h
+#lan-connection-panel {
+  border: 1px solid #b8c7d9;
+  border-radius: 12px;
+  background: #f6f9fc;
+  padding: 14px;
+}
 
+#lan-qr {
+  width: 168px;
+  height: 168px;
+  image-rendering: pixelated;
+}
 
-def process_pipeline(image, n_rows, n_cols):
-    """
-    Full pipeline: auto-detect → grid → analyze → heatmap → CSV.
-    Returns (overlay_image, heatmap_image, dataframe, csv_filepath).
-    """
-    if image is None:
-        return None, None, None, None, "**Error: please upload an image first.**"
+.gradio-container .block,
+.gradio-container .form {
+  border-color: rgba(24, 42, 69, 0.16);
+  border-radius: 10px;
+  background: var(--surface);
+}
 
-    # Auto-detect slide ROI
-    x, y, sw, sh = auto_detect_slide(image)
-    img_h, img_w = image.shape[:2]
+.gradio-container .gap {
+  gap: 18px;
+}
 
-    cell_w = sw // n_cols
-    cell_h = sh // n_rows
+.gradio-container button.primary {
+  background: var(--red) !important;
+  border-color: var(--red) !important;
+  color: var(--surface) !important;
+  font-weight: 650;
+}
 
-    # Generate overlay
-    overlay = image.copy()
-    cv2.rectangle(overlay, (x, y), (x + sw, y + sh), (0, 255, 255), 3)
-    for row in range(n_rows):
-        for col in range(n_cols):
-            xs = x + col * cell_w
-            ys = y + row * cell_h
-            idx = row * n_cols + col + 1
-            cv2.rectangle(overlay, (xs, ys), (xs + cell_w, ys + cell_h), (0, 255, 0), 1)
-            cv2.putText(overlay, str(idx), (xs + cell_w // 2 - 12, ys + cell_h // 2 + 6),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+.gradio-container button.primary:hover {
+  background: var(--navy) !important;
+  border-color: var(--navy) !important;
+}
 
-    # Analyze each cell
-    results = []
-    for row in range(n_rows):
-        for col in range(n_cols):
-            xs = x + col * cell_w
-            ys = y + row * cell_h
-            cell_img = image[ys:ys + cell_h, xs:xs + cell_w]
-            gray = to_8bit_grayscale(cell_img)
-            inv = 255 - gray
-            results.append({
-                "idx": row * n_cols + col + 1,
-                "row": row + 1, "col": col + 1,
-                "mean": round(float(np.mean(inv)), 2),
-                "median": round(float(np.median(inv)), 2),
-                "std": round(float(np.std(inv)), 2),
-                "min": int(np.min(inv)),
-                "max": int(np.max(inv)),
-                "int_den": round(float(np.sum(inv)), 2),
-                "area_px": int(inv.size),
-            })
+body .gradio-container div.status-field.block {
+  border-left: 4px solid var(--blue) !important;
+}
 
-    # Heatmap
-    means = [r["mean"] for r in results]
-    vmin, vmax = min(means), max(means)
-    cs = 120; pad = 6
-    hm_h = n_rows * (cs + pad) + pad + 60
-    hm_w = n_cols * (cs + pad) + pad
-    heatmap = np.full((hm_h, hm_w, 3), 36, dtype=np.uint8)
+.gradio-container .status-field textarea,
+.gradio-container .status-field input {
+  color: var(--navy);
+  font-weight: 600;
+}
 
-    for r in results:
-        row, col = r["row"] - 1, r["col"] - 1
-        norm = (r["mean"] - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-        blue  = int(255 * max(0, 1 - norm * 2))
-        green = int(255 * min(1, abs(norm - 0.5) * 2))
-        red   = int(255 * min(1, norm * 2))
-        x1, y1 = pad + col * (cs + pad), pad + row * (cs + pad) + 40
-        cv2.rectangle(heatmap, (x1, y1), (x1 + cs, y1 + cs), (blue, green, red), -1)
-        cv2.rectangle(heatmap, (x1, y1), (x1 + cs, y1 + cs), (255, 255, 255), 1)
-        text = f"{r['mean']:.1f}"
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        tx, ty = x1 + (cs - tw) // 2, y1 + (cs + th) // 2
-        txt_c = (0, 0, 0) if norm > 0.5 else (255, 255, 255)
-        cv2.putText(heatmap, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, txt_c, 2)
-        cv2.putText(heatmap, f"#{r['idx']}", (x1 + 4, y1 + 16),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-    # Scale bar
-    bar_y = hm_h - 30
-    for i in range(hm_w - 2 * pad):
-        ni = i / (hm_w - 2 * pad)
-        heatmap[bar_y:bar_y + 14, pad + i] = (
-            int(255 * max(0, 1 - ni * 2)),
-            int(255 * min(1, abs(ni - 0.5) * 2)),
-            int(255 * min(1, ni * 2))
-        )
-    cv2.putText(heatmap, f"{vmin:.0f}", (pad, bar_y - 4),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-    cv2.putText(heatmap, f"{vmax:.0f}", (hm_w - pad - 35, bar_y - 4),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+@media (max-width: 720px) {
+  .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
+    padding: 12px !important;
+  }
 
-    # Build table
-    table = [[r["idx"], r["row"], r["col"], r["mean"], r["median"], r["std"],
-              r["min"], r["max"], r["int_den"], r["area_px"]] for r in results]
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
 
-    # Build CSV
-    csv_lines = ["cell,row,col,mean,median,std,min,max,int_den,area_px"]
-    csv_lines += [f"{r['idx']},{r['row']},{r['col']},{r['mean']},{r['median']},"
-                  f"{r['std']},{r['min']},{r['max']},{r['int_den']},{r['area_px']}"
-                  for r in results]
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
-    tmp.write("\n".join(csv_lines).encode())
-    tmp.close()
+  .gradio-container .row {
+    flex-direction: column;
+  }
 
-    info = f"**Detected ROI:** x={x}, y={y}, w={sw}, h={sh} | Cell size: {cell_w}×{cell_h} px | Grid: {n_rows}×{n_cols} = {n_rows*n_cols} cells"
+  #lan-connection-panel,
+  #lan-connection-panel section,
+  .gradio-container img {
+    max-width: 100%;
+  }
 
-    return overlay, heatmap, table, tmp.name, info
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Gradio UI
-# ═══════════════════════════════════════════════════════════════
-
-HEADER = """
-# 🧫 Coagulation Quantification
-
-Upload a slide photo, set your grid size, click **Analyze**.
-The slide area is auto-detected. Results match ImageJ exactly
-(8-bit → Invert → Measure Mean).
-
-**If auto-detection is off**, use the sliders in the
-*Manual Adjustment* section to correct the ROI.
+  .gradio-container .table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
 """
 
-with gr.Blocks(title="Coagulation Quantification") as demo:
-    gr.Markdown(HEADER)
 
+def _offline_example_inputs():
+    return None
+
+
+def _load_local_styles() -> str:
+    candidates = [Path(__file__).with_name("web_styles.css")]
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root is not None:
+        packaged_path = Path(frozen_root) / "web_styles.css"
+        if packaged_path not in candidates:
+            candidates.append(packaged_path)
+
+    for path in candidates:
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    return _EMBEDDED_CSS
+
+
+def _strip_external_head_tags(source: str) -> str:
+    return _EXTERNAL_HEAD_TAG.sub("", source)
+
+
+def _offline_config_json(value):
+    config = dict(value)
+    config["root"] = ""
+    return gradio_routes.toorjson(config)
+
+
+def _offline_api_json(value):
+    def without_code_snippets(item):
+        if isinstance(item, dict):
+            return {
+                key: without_code_snippets(child)
+                for key, child in item.items()
+                if key != "code_snippets"
+            }
+        if isinstance(item, list):
+            return [without_code_snippets(child) for child in item]
+        return item
+
+    return gradio_routes.toorjson(without_code_snippets(value))
+
+
+def _register_offline_config(app_id: int) -> None:
+    """Keep Gradio 6.16's live config local without embedding its origin."""
+    with _CONFIG_PATCH_LOCK:
+        update_root = gradio_route_utils.update_root_in_config
+        offline_app_ids = getattr(update_root, _CONFIG_PATCH_MARKER, None)
+        if offline_app_ids is None:
+            offline_app_ids = set()
+            original_update_root = update_root
+
+            def update_offline_root(config, root):
+                updated = original_update_root(config, root)
+                if updated.get("app_id") not in offline_app_ids:
+                    return updated
+
+                def make_local(item):
+                    if isinstance(item, dict):
+                        return {key: make_local(value) for key, value in item.items()}
+                    if isinstance(item, list):
+                        return [make_local(value) for value in item]
+                    if isinstance(item, str) and root and item.startswith(root):
+                        return item[len(root) :]
+                    return item
+
+                local_config = make_local(updated)
+                local_config["root"] = ""
+                return local_config
+
+            setattr(update_offline_root, _CONFIG_PATCH_MARKER, offline_app_ids)
+            gradio_route_utils.update_root_in_config = update_offline_root
+
+        offline_app_ids.add(app_id)
+
+
+def _insert_before_module(source: str, content: str) -> str:
+    module = re.search(
+        r"""(?is)<script\b(?=[^>]*\btype=["']module["'])""",
+        source,
+    )
+    if module is None:
+        raise RuntimeError("The packaged Gradio template has no module entry point.")
+    return source[: module.start()] + content + source[module.start() :]
+
+
+def _install_offline_templates() -> None:
+    environment = gradio_routes.templates.env
+    with _TEMPLATE_LOCK:
+        current_loader = environment.loader
+        if getattr(current_loader, _TEMPLATE_LOADER_MARKER, False):
+            return
+        if current_loader is None:
+            raise RuntimeError("The packaged Gradio template loader is unavailable.")
+
+        packaged = {
+            name: current_loader.get_source(environment, name)[0]
+            for name in _TEMPLATE_NAMES
+        }
+        local_assets = "\n".join(_LOCAL_ASSET_TAG.findall(packaged[_TEMPLATE_NAMES[0]]))
+        if not local_assets:
+            raise RuntimeError("The packaged Gradio local assets are unavailable.")
+
+        overrides: dict[str, str] = {}
+        for name, source in packaged.items():
+            offline_source = _strip_external_head_tags(source)
+            offline_source = offline_source.replace(
+                "{{ config | toorjson }}",
+                "{{ config | toofflinejson }}",
+            )
+            offline_source = offline_source.replace(
+                "{{ gradio_api_info | toorjson }}",
+                "{{ gradio_api_info | toofflineapi }}",
+            )
+            if not _LOCAL_ASSET_TAG.search(offline_source):
+                offline_source = offline_source.replace(
+                    "</head>",
+                    f"{local_assets}\n</head>",
+                    1,
+                )
+            offline_source = _insert_before_module(
+                offline_source,
+                _ENGLISH_BOOTSTRAP
+                + _MOBILE_LAYOUT_STYLE
+                + _MOBILE_CAPTURE_BOOTSTRAP,
+            )
+            overrides[name] = offline_source
+
+        environment.filters["toofflinejson"] = _offline_config_json
+        environment.filters["toofflineapi"] = _offline_api_json
+        offline_loader = ChoiceLoader([DictLoader(overrides), current_loader])
+        setattr(offline_loader, _TEMPLATE_LOADER_MARKER, True)
+        environment.loader = offline_loader
+        environment.cache.clear()
+
+
+def _single_values(path, inset, threshold, root):
+    response = run_single_analysis(path, inset, threshold, root)
+    return (
+        response.crops,
+        response.overlay_path,
+        response.heatmap_path,
+        response.rows,
+        response.csv_path,
+        response.zip_path,
+        response.output_dir,
+        response.status,
+    )
+
+
+def _batch_values(paths, inset, threshold, root):
+    response = run_batch_analysis(paths or [], inset, threshold, root)
+    return (
+        response.rows,
+        response.summary_csv,
+        response.failures_csv,
+        response.zip_path,
+        response.batch_dir,
+        response.status,
+    )
+
+
+def _single_source(gallery_path, camera_path):
+    selected = [path for path in (gallery_path, camera_path) if path]
+    if not selected:
+        raise ValueError("Choose or take one image before analysis.")
+    if len(selected) != 1:
+        raise ValueError("Use only one image source at a time.")
+    return selected[0]
+
+
+def _build_single_tab(root: Path) -> None:
     with gr.Row():
         with gr.Column(scale=2):
-            img_input = gr.Image(label="1. Upload Slide Photo", type="numpy")
-
-            with gr.Row():
-                rows_slider = gr.Slider(1, 10, value=3, step=1, label="Grid Rows")
-                cols_slider = gr.Slider(1, 10, value=6, step=1, label="Grid Columns")
-
-            with gr.Accordion("Manual Adjustment (if auto-detection is off)", open=False):
-                gr.Markdown("Adjust these sliders to correct the ROI bounding box.")
-                x_slider = gr.Slider(0, 5000, value=0, step=1, label="X (left edge)")
-                y_slider = gr.Slider(0, 5000, value=0, step=1, label="Y (top edge)")
-                w_slider = gr.Slider(100, 5000, value=1000, step=1, label="Width")
-                h_slider = gr.Slider(100, 5000, value=800, step=1, label="Height")
-
-            analyze_btn = gr.Button("2. Analyze", variant="primary", size="lg")
-
-            info_text = gr.Markdown("")
-
+            gallery_source = gr.File(
+                label="Choose from gallery or files",
+                file_count="single",
+                type="filepath",
+                elem_id="gallery-source",
+            )
+            camera_source = gr.File(
+                label="Take photo",
+                file_count="single",
+                type="filepath",
+                elem_id="camera-source",
+            )
+            inset = gr.Slider(
+                0,
+                15,
+                value=5,
+                step=0.5,
+                label="Inner crop inset",
+            )
+            threshold = gr.Slider(
+                0,
+                255,
+                value=60,
+                step=1,
+                label="No-clot threshold",
+            )
+            analyze = gr.Button("Analyze Image", variant="primary")
+            status = gr.Textbox(
+                label="Status",
+                interactive=False,
+                elem_classes="status-field",
+            )
         with gr.Column(scale=3):
-            overlay_output = gr.Image(label="Grid Overlay (check alignment)")
-            heatmap_output = gr.Image(label="Heatmap (blue=low, red=high coagulation)")
-
-    table_output = gr.DataFrame(
-        label="Per-Cell Results",
-        headers=["Cell", "Row", "Col", "Mean", "Median", "Std", "Min", "Max", "IntDen", "Area(px)"]
+            crops = gr.Gallery(
+                label="Final inner crops",
+                columns=3,
+                rows=3,
+            )
+            with gr.Row():
+                overlay = gr.Image(
+                    label="Detected and final boundaries",
+                    type="filepath",
+                )
+                heatmap = gr.Image(
+                    label="Publication heatmap",
+                    type="filepath",
+                )
+    table = gr.Dataframe(
+        headers=["Cell", "Row", "Column", "Mean", "Confidence", "Recovered"],
+        interactive=False,
+        label="Per-cell results",
     )
-    csv_output = gr.File(label="Download CSV")
+    with gr.Row():
+        csv_file = gr.File(label="Download CSV", interactive=False)
+        zip_file = gr.File(label="Download result ZIP", interactive=False)
+    result_dir = gr.Textbox(label="Saved result folder", interactive=False)
+    open_folder = gr.Button("Open folder on Windows PC")
 
-    # Auto-update slider limits when image is uploaded
-    def on_upload(image):
-        if image is None:
-            return gr.Slider(maximum=5000), gr.Slider(maximum=5000), \
-                   gr.Slider(value=1000, maximum=5000), gr.Slider(value=800, maximum=5000)
-        h, w = image.shape[:2]
-        # Auto-detect for initial values
-        x, y, sw, sh = auto_detect_slide(image)
-        return gr.Slider(value=x, maximum=w), gr.Slider(value=y, maximum=h), \
-               gr.Slider(value=sw, maximum=w), gr.Slider(value=sh, maximum=h)
+    gallery_source.change(lambda: None, outputs=camera_source)
+    camera_source.change(lambda: None, outputs=gallery_source)
 
-    img_input.change(on_upload, img_input, [x_slider, y_slider, w_slider, h_slider])
-
-    # When "Analyze" is clicked, use manual sliders (which default to auto-detected values)
-    analyze_btn.click(
-        lambda img, nr, nc, x, y, w, h: process_pipeline(img, nr, nc) if img is not None else
-            (None, None, None, None, "**Error: upload an image first.**"),
-        [img_input, rows_slider, cols_slider, x_slider, y_slider, w_slider, h_slider],
-        [overlay_output, heatmap_output, table_output, csv_output, info_text]
+    analyze.click(
+        lambda gallery, camera, value, cutoff: _single_values(
+            _single_source(gallery, camera), value, cutoff, root
+        ),
+        [gallery_source, camera_source, inset, threshold],
+        [crops, overlay, heatmap, table, csv_file, zip_file, result_dir, status],
     )
+    open_folder.click(
+        lambda path: open_result_folder(path, root),
+        result_dir,
+        status,
+    )
+
+
+
+def _build_batch_tab(root: Path) -> None:
+    sources = gr.File(
+        label="Complete 3×3 fixture images",
+        file_count="multiple",
+        type="filepath",
+    )
+    with gr.Row():
+        inset = gr.Slider(
+            0,
+            15,
+            value=5,
+            step=0.5,
+            label="Inner crop inset",
+        )
+        threshold = gr.Slider(
+            0,
+            255,
+            value=60,
+            step=1,
+            label="No-clot threshold",
+        )
+    analyze = gr.Button("Analyze Batch", variant="primary")
+    status = gr.Textbox(
+        label="Batch status",
+        interactive=False,
+        elem_classes="status-field",
+    )
+    table = gr.Dataframe(
+        headers=["Image", "Cells", "Status", "Reason", "Result"],
+        interactive=False,
+        label="Batch results",
+    )
+    with gr.Row():
+        summary = gr.File(label="Batch summary CSV", interactive=False)
+        failures = gr.File(label="Failure report CSV", interactive=False)
+        archive = gr.File(label="Download batch ZIP", interactive=False)
+    batch_dir = gr.Textbox(label="Saved batch folder", interactive=False)
+    open_folder = gr.Button("Open batch folder on Windows PC")
+
+    analyze.click(
+        lambda paths, value, cutoff: _batch_values(paths, value, cutoff, root),
+        [sources, inset, threshold],
+        [table, summary, failures, archive, batch_dir, status],
+    )
+    open_folder.click(
+        lambda path: open_result_folder(path, root),
+        batch_dir,
+        status,
+    )
+
+
+def _qr_data_url(value: str) -> str:
+    image = qrcode.make(value)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _connection_panel(access: LanAccessInfo) -> str:
+    if access.preferred_url is None:
+        return (
+            "<section><h2>Phone access unavailable</h2>"
+            "<p>Connect this PC and phone to the same Wi-Fi, then restart "
+            "StartWebsite.exe.</p></section>"
+        )
+    links = "".join(
+        f'<li><code>{escape(url)}</code></li>' for url in access.phone_urls
+    )
+    return (
+        "<section><h2>Open on your phone</h2>"
+        f'<img id="lan-qr" src="{_qr_data_url(access.preferred_url)}" '
+        'alt="Phone connection QR code">'
+        f"<ul>{links}</ul>"
+        "<p><strong>No password is enabled.</strong> Use only on a trusted "
+        "private Wi-Fi network. Restart after changing Wi-Fi.</p></section>"
+    )
+
+
+def create_app(
+    results_root: str | Path,
+    lan_access: LanAccessInfo | None = None,
+) -> gr.Blocks:
+    """Build the offline analysis application without starting its server."""
+    _install_offline_templates()
+    root = Path(results_root)
+    css = _load_local_styles()
+    with gr.Blocks(
+        title="Coagulation Analysis",
+        analytics_enabled=False,
+    ) as application:
+        gr.Markdown(
+            "# Coagulation Analysis\nLocal and offline",
+            elem_id="application-title",
+        )
+        if lan_access is not None:
+            gr.HTML(_connection_panel(lan_access), elem_id="lan-connection-panel")
+        with gr.Tabs():
+            with gr.Tab("Single Image"):
+                _build_single_tab(root)
+            with gr.Tab("Batch Processing"):
+                _build_batch_tab(root)
+    # Gradio 6 applies CSS at launch. Retaining it on both attributes keeps the
+    # factory inspectable and lets any caller launch the returned Blocks object
+    # without separately knowing the stylesheet path.
+    application.css = css
+    application._deprecated_css = css
+    application.css_paths = []
+    application.head_paths = []
+    application.theme = _LOCAL_THEME
+    application._deprecated_theme = _LOCAL_THEME
+    application._set_html_css_theme_variables()
+    application.footer_links = []
+    for block in application.blocks.values():
+        if hasattr(block, "example_inputs"):
+            block.example_inputs = _offline_example_inputs
+    application.config = application.get_config_file()
+    _register_offline_config(application.config["app_id"])
+    return application
+
+
+def main() -> None:
+    """Launch the local application when this module is run as a script."""
+    create_app(Path.cwd() / "results").launch(
+        server_name="127.0.0.1",
+        share=False,
+        inbrowser=True,
+        footer_links=[],
+    )
+
 
 if __name__ == "__main__":
-    demo.launch()
+    main()

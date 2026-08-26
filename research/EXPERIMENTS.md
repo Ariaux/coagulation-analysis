@@ -72,6 +72,24 @@ coordinates. Photometric and content perturbations do not alter truth boxes.
 
 ## Metrics
 
+Both the manual-image and synthetic evaluations score the box returned directly
+by each evaluation method. They do not apply the production
+`AnalysisSettings.inset_percent` step afterward. For the hybrid method this is
+the detector box (`InnerSquare.source_bbox`), before the website's final inset
+box is calculated. The fixed-ratio and contour-only methods retain their own
+method-specific safety margins described in the implementation, but receive no
+additional shared production inset. Therefore these results must not be
+described as metrics for the website's final 5% inset crops.
+
+Every reported experiment must identify the box stage used for metrics as
+either `detected/evaluator-returned` or `final inset`, and must report the exact
+`inset_percent` and `no_clot_threshold` settings alongside its results. For the
+evaluation commands in this document, report `inset_percent: not applied`
+and `no_clot_threshold: not applied`; the threshold does not affect cropping
+metrics. If website or desktop result artifacts are evaluated instead, report
+their recorded numerical values (defaults: 5% inset and threshold 60). Do not
+mix detected-box and final-inset measurements in one summary.
+
 For an `xyxy` box \(A\) and reference box \(T\):
 
 - Intersection over union: \(IoU(A,T)=|A∩T|/|A∪T|\).
@@ -141,6 +159,10 @@ Each output directory contains:
   partial production results.
 
 ## Results
+
+Alongside any completed table, state whether the source is manual or synthetic,
+the metric box stage, the inset percentage, and the no-clot threshold. A value
+that was not applied must be written explicitly as `not applied`, not omitted.
 
 | Method | Mean IoU | Mean boundary error | All-nine success | Measurement MAE | Runtime |
 |---|---:|---:|---:|---:|---:|
