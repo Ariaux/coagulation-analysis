@@ -2,6 +2,7 @@ import importlib
 from importlib import metadata
 from pathlib import Path
 import re
+import textwrap
 import unittest
 
 
@@ -209,7 +210,9 @@ class BuildWorkflowTests(unittest.TestCase):
             '"http://127.0.0.1:$port"',
             "StatusCode -ne 200",
             "Coagulation Analysis",
-            "tests.test_grid_detector import make_fixture",
+            "import numpy as np",
+            "np.full",
+            "for row in range(3)",
             "cv2.imencode",
             "gradio_client import Client, handle_file",
             "client.predict",
@@ -243,7 +246,23 @@ class BuildWorkflowTests(unittest.TestCase):
                 self.assertIn(fragment, smoke_step)
         self.assertNotIn("share=True", smoke_step)
         self.assertNotIn("--share", smoke_step)
+        self.assertNotIn("tests.test_grid_detector", smoke_step)
         self.assertNotIn('              "http://",', smoke_step)
+
+    def test_packaged_functional_smoke_client_is_self_contained_python(self):
+        smoke_step = _yaml_block(
+            self.workflow,
+            "      - name: Smoke test packaged Windows website",
+        )
+        match = re.search(
+            r"\$clientSmoke = @'\n(.*?)\n\s*'@",
+            smoke_step,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        script = textwrap.dedent(match.group(1))
+        compile(script, "<packaged-functional-smoke>", "exec")
+        self.assertNotIn("from tests", script)
 
     def test_windows_archive_contains_complete_web_and_desktop_onedir_apps(self):
         archive_step = _yaml_block(

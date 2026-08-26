@@ -181,13 +181,59 @@ jobs:
           from pathlib import Path
 
           import cv2
+          import numpy as np
           from gradio_client import Client, handle_file
 
-          from tests.test_grid_detector import make_fixture
-
-
           fixture_path = Path(os.environ["PACKAGED_FIXTURE_PATH"])
-          image, _ = make_fixture(filled=(2, 5, 8))
+          size = 900
+          margin = int(round(size * 0.04))
+          cell = (size - 2 * margin) // 3
+          line = max(8, size // 90)
+          dark = (25, 25, 25)
+          image = np.full((size, size, 3), 210, dtype=np.uint8)
+          fixture_end = margin + 3 * cell
+          cv2.rectangle(
+              image,
+              (margin, margin),
+              (fixture_end, fixture_end),
+              dark,
+              line,
+          )
+          for row in range(3):
+              for column in range(3):
+                  x0 = margin + column * cell
+                  y0 = margin + row * cell
+                  x1 = x0 + cell
+                  y1 = y0 + cell
+                  cv2.rectangle(image, (x0, y0), (x1, y1), dark, line)
+                  inset = int(round(cell * 0.22))
+                  inner_left = x0 + inset
+                  inner_top = y0 + inset
+                  inner_right = x1 - inset
+                  inner_bottom = y1 - inset
+                  cv2.rectangle(
+                      image,
+                      (inner_left, inner_top),
+                      (inner_right, inner_bottom),
+                      dark,
+                      line,
+                  )
+                  index = row * 3 + column + 1
+                  if index in (2, 5, 8):
+                      content_margin = line // 2 + 2
+                      cv2.rectangle(
+                          image,
+                          (
+                              inner_left + content_margin,
+                              inner_top + content_margin,
+                          ),
+                          (
+                              inner_right - content_margin,
+                              inner_bottom - content_margin,
+                          ),
+                          (65, 65, 65),
+                          -1,
+                      )
           success, encoded = cv2.imencode(".png", image)
           if not success:
               raise RuntimeError("Could not encode the synthetic fixture.")
