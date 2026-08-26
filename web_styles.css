@@ -77,7 +77,26 @@ body .gradio-container div.status-field.block {
 
 @media (max-width: 720px) {
   .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
     padding: 12px !important;
+  }
+
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .gradio-container .row {
+    flex-direction: column;
   }
 
   #lan-connection-panel,

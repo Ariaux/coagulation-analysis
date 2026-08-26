@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from datetime import datetime, timezone
+import errno
 import os
 from pathlib import Path
 import socket
@@ -23,6 +24,7 @@ _LINKED_RESULTS_ERROR = (
     "Results folder must not be a symlink, junction, or reparse point."
 )
 _STARTUP_LOG_NAME = "website-startup.log"
+_AUTOMATIC_PORT_ATTEMPTS = 3
 
 
 class _LauncherArgumentError(ValueError):
@@ -68,6 +70,32 @@ def _validated_port(port: int | None) -> int | None:
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError(_PORT_ERROR)
     return port
+
+
+def _address_is_in_use(exception: BaseException) -> bool:
+    """Recognize the cross-platform socket error raised for a lost port race."""
+    pending: list[BaseException] = [exception]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "errno", None) == errno.EADDRINUSE:
+            return True
+        if getattr(current, "winerror", None) == 10048:
+            return True
+        message = str(current).casefold()
+        if (
+            "address already in use" in message
+            or "only one usage of each socket address" in message
+            or "cannot find empty port in range" in message
+        ):
+            return True
+        for nested in (current.__cause__, current.__context__):
+            if nested is not None:
+                pending.append(nested)
+    return False
 
 
 def _path_is_linked(path: Path) -> bool:
@@ -227,33 +255,57 @@ def launch_site(
     open_browser: bool,
 ) -> None:
     """Build and start the private LAN Gradio application."""
-    selected_port = _validated_port(port)
-    if selected_port is None:
-        selected_port = available_loopback_port()
+    requested_port = _validated_port(port)
     root = _prepare_results_root(results_root)
-    access = discover_lan_access(selected_port)
-    application = create_app(root, access)
-    try:
-        launch_result = application.launch(
-            server_name="0.0.0.0",
-            server_port=selected_port,
-            share=False,
-            inbrowser=False,
-            prevent_thread_lock=True,
-            show_error=True,
-            allowed_paths=[str(root)],
-            footer_links=[],
+    attempts = _AUTOMATIC_PORT_ATTEMPTS if requested_port is None else 1
+    application = None
+    access = None
+    for attempt in range(attempts):
+        selected_port = (
+            requested_port
+            if requested_port is not None
+            else available_loopback_port()
         )
+        access = discover_lan_access(selected_port)
+        application = create_app(root, access)
         try:
-            local_url = launch_result[1]
-        except (IndexError, TypeError) as exception:
-            raise RuntimeError(
-                "The local website did not provide a browser address."
-            ) from exception
-        if not isinstance(local_url, str) or not local_url:
-            raise RuntimeError(
-                "The local website did not provide a browser address."
+            launch_result = application.launch(
+                server_name="0.0.0.0",
+                server_port=selected_port,
+                share=False,
+                inbrowser=False,
+                prevent_thread_lock=True,
+                show_error=True,
+                allowed_paths=[str(root)],
+                footer_links=[],
             )
+            try:
+                local_url = launch_result[1]
+            except (IndexError, TypeError) as exception:
+                raise RuntimeError(
+                    "The local website did not provide a browser address."
+                ) from exception
+            if not isinstance(local_url, str) or not local_url:
+                raise RuntimeError(
+                    "The local website did not provide a browser address."
+                )
+            break
+        except Exception as exception:
+            try:
+                application.close()
+            except Exception:
+                pass
+            if (
+                requested_port is None
+                and attempt + 1 < attempts
+                and _address_is_in_use(exception)
+            ):
+                continue
+            raise
+    else:  # pragma: no cover - the loop always returns or raises
+        raise RuntimeError("Could not start the local website.")
+
+    try:
         _print_console(f"Computer: {access.loopback_url}")
         for phone_url in access.phone_urls:
             _print_console(f"Phone: {phone_url}")

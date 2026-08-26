@@ -94,6 +94,42 @@ if (!configureCameraInput()) {
 }
 </script>
 """
+_MOBILE_LAYOUT_STYLE = """\
+<style data-mobile-layout>
+@media (max-width: 720px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    padding: 12px !important;
+  }
+
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .gradio-container .row {
+    flex-direction: column;
+  }
+}
+</style>
+"""
 _TEMPLATE_LOCK = threading.RLock()
 _TEMPLATE_LOADER_MARKER = "_coagulation_offline_templates"
 _CONFIG_PATCH_LOCK = threading.RLock()
@@ -177,7 +213,26 @@ body .gradio-container div.status-field.block {
 
 @media (max-width: 720px) {
   .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
     padding: 12px !important;
+  }
+
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .gradio-container .row {
+    flex-direction: column;
   }
 
   #lan-connection-panel,
@@ -318,7 +373,9 @@ def _install_offline_templates() -> None:
                 )
             offline_source = _insert_before_module(
                 offline_source,
-                _ENGLISH_BOOTSTRAP + _MOBILE_CAPTURE_BOOTSTRAP,
+                _ENGLISH_BOOTSTRAP
+                + _MOBILE_LAYOUT_STYLE
+                + _MOBILE_CAPTURE_BOOTSTRAP,
             )
             overrides[name] = offline_source
 

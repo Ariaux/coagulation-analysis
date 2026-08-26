@@ -355,6 +355,15 @@ class WebApplicationTests(unittest.TestCase):
         self.assertNotIn("getUserMedia", bootstrap)
         self.assertNotIn("https://", bootstrap)
 
+    def test_mobile_css_overrides_gradio_minimum_widths(self):
+        css = web_app._load_local_styles()
+        mobile = css[css.index("@media (max-width: 720px)") :]
+        self.assertIn("\n@media (max-width: 720px)", css)
+        self.assertNotIn("\n+@media", css)
+        self.assertIn("box-sizing: border-box !important", mobile)
+        self.assertIn("min-width: 0 !important", mobile)
+        self.assertIn("flex-direction: column", mobile)
+
     def test_application_is_offline_and_includes_local_styles(self):
         config = self.make_config()
 
@@ -470,6 +479,9 @@ class WebApplicationTests(unittest.TestCase):
                 )
                 self.assertIn('navigator, "language"', html)
                 self.assertIn('navigator, "languages"', html)
+                self.assertIn("data-mobile-layout", html)
+                self.assertIn("width: 100vw !important", html)
+                self.assertIn("overflow-x: hidden", html)
                 self.assertIn("endpoint-marker", html)
                 self.assertNotIn("code_snippets", html)
 

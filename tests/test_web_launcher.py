@@ -147,6 +147,36 @@ class WebLauncherStartupTests(unittest.TestCase):
         open_browser.assert_called_once_with("http://127.0.0.1:43123")
         fake_app.block_thread.assert_called_once_with()
 
+    def test_automatic_port_retries_when_first_port_is_taken_during_launch(self):
+        first_app = fake_application()
+        first_app.launch.side_effect = OSError(
+            "Cannot find empty port in range: 43123-43123."
+        )
+        second_app = fake_application("http://127.0.0.1:43124/")
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            web_launcher,
+            "available_loopback_port",
+            side_effect=(43123, 43124),
+        ) as available_port, mock.patch.object(
+            web_launcher,
+            "create_app",
+            side_effect=(first_app, second_app),
+        ) as create_app:
+            web_launcher.launch_site(Path(temp_dir), None, False)
+
+        self.assertEqual(2, available_port.call_count)
+        self.assertEqual(2, create_app.call_count)
+        self.assertEqual(
+            [43123, 43124],
+            [
+                call.kwargs["server_port"]
+                for call in (first_app.launch.call_args, second_app.launch.call_args)
+            ],
+        )
+        first_app.close.assert_called_once_with()
+        first_app.block_thread.assert_not_called()
+        second_app.block_thread.assert_called_once_with()
+
     def test_no_browser_never_opens_a_browser_and_blocks_normally(self):
         fake_app = fake_application()
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
