@@ -108,6 +108,50 @@ class WebApplicationTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(label, serialized)
 
+    def test_hosted_app_omits_server_side_folder_opening_controls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(
+                Path(temp_dir) / "results",
+                hosted=True,
+            )
+            serialized = str(application.get_config_file())
+
+        self.assertIn("Hosted web app", serialized)
+        self.assertNotIn("Open folder on Windows PC", serialized)
+        self.assertNotIn("Open batch folder on Windows PC", serialized)
+        self.assertNotIn("Saved result folder", serialized)
+        self.assertNotIn("Saved batch folder", serialized)
+
+    def test_hosted_cleanup_removes_only_old_published_results(self):
+        cleanup = getattr(web_app, "_cleanup_hosted_results", None)
+        self.assertIsNotNone(cleanup)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_single = root / "sample_analysis"
+            old_batch = root / "batch_20260101_010101_deadbeef"
+            fresh_single = root / "fresh_analysis"
+            staging = root / ".sample_staging_123"
+            unrelated = root / "keep-me"
+            for directory in (
+                old_single,
+                old_batch,
+                fresh_single,
+                staging,
+                unrelated,
+            ):
+                directory.mkdir()
+            os.utime(old_single, (100, 100))
+            os.utime(old_batch, (100, 100))
+            os.utime(fresh_single, (950, 950))
+
+            cleanup(root, max_age_seconds=100, now=1000)
+
+            self.assertFalse(old_single.exists())
+            self.assertFalse(old_batch.exists())
+            self.assertTrue(fresh_single.exists())
+            self.assertTrue(staging.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_connection_panel_contains_private_url_and_local_qr(self):
         access = LanAccessInfo(
             loopback_url="http://127.0.0.1:7860",

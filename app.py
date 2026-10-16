@@ -8,9 +8,11 @@ from io import BytesIO
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import threading
+import time
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
@@ -388,7 +390,37 @@ def _install_offline_templates() -> None:
         environment.cache.clear()
 
 
-def _single_values(path, inset, threshold, root):
+def _cleanup_hosted_results(
+    root: str | Path,
+    max_age_seconds: int = 24 * 60 * 60,
+    now: float | None = None,
+) -> None:
+    """Remove only expired, published result bundles from hosted storage."""
+    cutoff = (time.time() if now is None else now) - max_age_seconds
+    try:
+        entries = list(Path(root).iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        published_name = entry.name.startswith("batch_") or entry.name.endswith(
+            "_analysis"
+        )
+        if entry.name.startswith(".") or not published_name:
+            continue
+        try:
+            if (
+                entry.is_dir()
+                and not entry.is_symlink()
+                and entry.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(entry)
+        except OSError:
+            continue
+
+
+def _single_values(path, inset, threshold, root, hosted=False):
+    if hosted:
+        _cleanup_hosted_results(root)
     response = run_single_analysis(path, inset, threshold, root)
     return (
         response.crops,
@@ -402,7 +434,9 @@ def _single_values(path, inset, threshold, root):
     )
 
 
-def _batch_values(paths, inset, threshold, root):
+def _batch_values(paths, inset, threshold, root, hosted=False):
+    if hosted:
+        _cleanup_hosted_results(root)
     response = run_batch_analysis(paths or [], inset, threshold, root)
     return (
         response.rows,
@@ -423,7 +457,7 @@ def _single_source(gallery_path, camera_path):
     return selected[0]
 
 
-def _build_single_tab(root: Path) -> None:
+def _build_single_tab(root: Path, hosted: bool = False) -> None:
     with gr.Row():
         with gr.Column(scale=2):
             gallery_source = gr.File(
@@ -481,29 +515,34 @@ def _build_single_tab(root: Path) -> None:
     with gr.Row():
         csv_file = gr.File(label="Download CSV", interactive=False)
         zip_file = gr.File(label="Download result ZIP", interactive=False)
-    result_dir = gr.Textbox(label="Saved result folder", interactive=False)
-    open_folder = gr.Button("Open folder on Windows PC")
+    result_dir = (
+        gr.State()
+        if hosted
+        else gr.Textbox(label="Saved result folder", interactive=False)
+    )
 
     gallery_source.change(lambda: None, outputs=camera_source)
     camera_source.change(lambda: None, outputs=gallery_source)
 
     analyze.click(
         lambda gallery, camera, value, cutoff: _single_values(
-            _single_source(gallery, camera), value, cutoff, root
+            _single_source(gallery, camera), value, cutoff, root, hosted
         ),
         [gallery_source, camera_source, inset, threshold],
         [crops, overlay, heatmap, table, csv_file, zip_file, result_dir, status],
         api_name="analyze_single",
     )
-    open_folder.click(
-        lambda path: open_result_folder(path, root),
-        result_dir,
-        status,
-    )
+    if not hosted:
+        open_folder = gr.Button("Open folder on Windows PC")
+        open_folder.click(
+            lambda path: open_result_folder(path, root),
+            result_dir,
+            status,
+        )
 
 
 
-def _build_batch_tab(root: Path) -> None:
+def _build_batch_tab(root: Path, hosted: bool = False) -> None:
     sources = gr.File(
         label="Complete 3×3 fixture images",
         file_count="multiple",
@@ -539,19 +578,26 @@ def _build_batch_tab(root: Path) -> None:
         summary = gr.File(label="Batch summary CSV", interactive=False)
         failures = gr.File(label="Failure report CSV", interactive=False)
         archive = gr.File(label="Download batch ZIP", interactive=False)
-    batch_dir = gr.Textbox(label="Saved batch folder", interactive=False)
-    open_folder = gr.Button("Open batch folder on Windows PC")
+    batch_dir = (
+        gr.State()
+        if hosted
+        else gr.Textbox(label="Saved batch folder", interactive=False)
+    )
 
     analyze.click(
-        lambda paths, value, cutoff: _batch_values(paths, value, cutoff, root),
+        lambda paths, value, cutoff: _batch_values(
+            paths, value, cutoff, root, hosted
+        ),
         [sources, inset, threshold],
         [table, summary, failures, archive, batch_dir, status],
     )
-    open_folder.click(
-        lambda path: open_result_folder(path, root),
-        batch_dir,
-        status,
-    )
+    if not hosted:
+        open_folder = gr.Button("Open batch folder on Windows PC")
+        open_folder.click(
+            lambda path: open_result_folder(path, root),
+            batch_dir,
+            status,
+        )
 
 
 def _qr_data_url(value: str) -> str:
@@ -606,9 +652,9 @@ def create_app(
             gr.HTML(_connection_panel(lan_access), elem_id="lan-connection-panel")
         with gr.Tabs():
             with gr.Tab("Single Image"):
-                _build_single_tab(root)
+                _build_single_tab(root, hosted=hosted)
             with gr.Tab("Batch Processing"):
-                _build_batch_tab(root)
+                _build_batch_tab(root, hosted=hosted)
     # Gradio 6 applies CSS at launch. Retaining it on both attributes keeps the
     # factory inspectable and lets any caller launch the returned Blocks object
     # without separately knowing the stylesheet path.
