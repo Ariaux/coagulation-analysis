@@ -632,6 +632,7 @@ def main() -> None:
     """Launch locally or with Hugging Face Space network settings."""
     if os.environ.get("SPACE_ID"):
         results_root = Path(tempfile.gettempdir()) / "coagulation-hugging-face-results"
+        results_root.mkdir(parents=True, exist_ok=True)
         create_app(results_root, hosted=True).launch(
             server_name="0.0.0.0",
             server_port=int(os.environ.get("PORT", "7860")),

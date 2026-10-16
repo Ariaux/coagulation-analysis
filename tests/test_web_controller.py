@@ -618,15 +618,23 @@ class WebApplicationTests(unittest.TestCase):
         main = getattr(web_app, "main", None)
         self.assertIsNotNone(main)
         application = mock.Mock()
-        hosted_root = Path(tempfile.gettempdir()) / "coagulation-hugging-face-results"
-        with mock.patch.dict(
-            web_app.os.environ,
-            {"SPACE_ID": "Yilunaria/coagulation-quantification", "PORT": "7860"},
-            clear=True,
-        ), mock.patch.object(
-            web_app, "create_app", return_value=application
-        ) as create:
-            main()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hosted_root = Path(temp_dir) / "coagulation-hugging-face-results"
+            with mock.patch.dict(
+                web_app.os.environ,
+                {
+                    "SPACE_ID": "Yilunaria/coagulation-quantification",
+                    "PORT": "7860",
+                },
+                clear=True,
+            ), mock.patch.object(
+                web_app.tempfile, "gettempdir", return_value=temp_dir
+            ), mock.patch.object(
+                web_app, "create_app", return_value=application
+            ) as create:
+                main()
+
+            self.assertTrue(hosted_root.is_dir())
 
         create.assert_called_once_with(hosted_root, hosted=True)
         application.launch.assert_called_once_with(
