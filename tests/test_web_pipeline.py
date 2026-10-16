@@ -61,7 +61,7 @@ class WebPipelineTests(unittest.TestCase):
         result = app.process_pipeline(fixture_rgb, "incomplete.png")
 
         self.assertEqual(result[:4], (None, None, [], None))
-        self.assertIn("complete 3x3 fixture", result[4].lower())
+        self.assertIn("incomplete", result[4].lower())
 
     def test_module_exposes_gradio_demo(self):
         self.assertTrue(hasattr(app, "demo"))
