@@ -122,6 +122,21 @@ class WebApplicationTests(unittest.TestCase):
         self.assertNotIn("Saved result folder", serialized)
         self.assertNotIn("Saved batch folder", serialized)
 
+    def test_hosted_app_expires_gradio_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(
+                Path(temp_dir) / "results",
+                hosted=True,
+            )
+
+        self.assertEqual(application.delete_cache, (3600, 86400))
+
+    def test_local_app_keeps_gradio_default_cache_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(Path(temp_dir) / "results")
+
+        self.assertIsNone(application.delete_cache)
+
     def test_hosted_cleanup_removes_only_old_published_results(self):
         cleanup = getattr(web_app, "_cleanup_hosted_results", None)
         self.assertIsNotNone(cleanup)

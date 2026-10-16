@@ -639,6 +639,7 @@ def create_app(
     with gr.Blocks(
         title="Coagulation Analysis",
         analytics_enabled=False,
+        delete_cache=(3600, 86400) if hosted else None,
     ) as application:
         gr.Markdown(
             (
