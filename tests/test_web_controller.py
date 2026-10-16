@@ -154,6 +154,32 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIn("Local workspace", local)
         self.assertNotIn("Online workspace", local)
 
+    def test_stylesheet_implements_warm_minimal_design(self):
+        stylesheet = Path(web_app.__file__).with_name("web_styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        for token in (
+            "--canvas: #fbf7ef",
+            "--ink: #2c251e",
+            "--accent: #bd4b33",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, stylesheet)
+        for selector in (
+            "#product-bar",
+            "#hero-card",
+            "#single-workspace",
+            "#batch-workspace",
+            ".workspace-card",
+            ".result-card",
+            ".download-card",
+            ".primary-action",
+            "@media (max-width: 760px)",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, stylesheet)
+
     def test_hosted_app_omits_server_side_folder_opening_controls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             application = create_app(
@@ -462,10 +488,10 @@ class WebApplicationTests(unittest.TestCase):
 
     def test_mobile_css_overrides_gradio_minimum_widths(self):
         css = web_app._load_local_styles()
-        mobile = css[css.index("@media (max-width: 720px)") :]
-        self.assertIn("\n@media (max-width: 720px)", css)
+        mobile = css[css.index("@media (max-width: 760px)") :]
+        self.assertIn("\n@media (max-width: 760px)", css)
         self.assertNotIn("\n+@media", css)
-        self.assertIn("box-sizing: border-box !important", mobile)
+        self.assertIn("box-sizing: border-box !important", css)
         self.assertIn("min-width: 0 !important", mobile)
         self.assertIn("flex-direction: column", mobile)
 
@@ -483,22 +509,22 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual("Coagulation Analysis", config["title"])
         self.assertFalse(config["analytics_enabled"])
         self.assertEqual("False", os.environ["GRADIO_ANALYTICS_ENABLED"])
-        markdown_values = [
+        html_values = [
             component.get("props", {}).get("value")
             for component in config["components"]
-            if component["type"] == "markdown"
+            if component["type"] == "html"
         ]
-        self.assertIn("# Coagulation Analysis\nLocal and offline", markdown_values)
+        self.assertTrue(any("Coagula" in value for value in html_values))
+        self.assertTrue(any("Local workspace" in value for value in html_values))
 
         stylesheet = config["css"]
         self.assertIsInstance(stylesheet, str)
         for value in (
-            "#182a45",
-            "#3f78b5",
-            "#a42e3d",
-            "#ffffff",
-            "#f5f7fa",
-            "max-width: 1440px",
+            "#fbf7ef",
+            "#2c251e",
+            "#bd4b33",
+            "#fffdf8",
+            "max-width: 1380px",
         ):
             with self.subTest(value=value):
                 self.assertIn(value, stylesheet)
@@ -512,17 +538,17 @@ class WebApplicationTests(unittest.TestCase):
         title = next(
             component
             for component in config["components"]
-            if component.get("props", {}).get("elem_id") == "application-title"
+            if component.get("props", {}).get("elem_id") == "hero-card"
         )
 
-        self.assertEqual("markdown", title["type"])
+        self.assertEqual("html", title["type"])
         self.assertRegex(
             stylesheet,
-            r"(?s)#application-title h1\s*\{[^}]*color:\s*var\(--navy\)\s*!important",
+            r"(?s)\.hero-copy h1\s*\{[^}]*font-size:\s*clamp",
         )
         self.assertRegex(
             stylesheet,
-            r"(?s)body \.gradio-container div\.status-field\.block\s*\{[^}]*border-left:\s*4px solid var\(--blue\)\s*!important",
+            r"(?s)body \.gradio-container \.status-field\.block\s*\{[^}]*border-left:\s*4px solid var\(--accent\)\s*!important",
         )
         for label in ("Status", "Batch status"):
             classes = self.one_component(config, label)["props"]["elem_classes"]

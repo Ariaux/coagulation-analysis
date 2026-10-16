@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from base64 import b64encode
+from base64 import b64encode, b85decode
 from html import escape
 from io import BytesIO
 import os
@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
@@ -250,6 +251,11 @@ body .gradio-container div.status-field.block {
   }
 }
 """
+_EMBEDDED_CSS = zlib.decompress(
+    b85decode(
+        "c-pmENsr^W6~5Q6V5%@cIgt$Qmfgr8$RWTSavJ0iG;*Ls%4SNI6iTio!Tk3;l3FN{vR%{NXrQ`^>s!CKPzPSu9s1t`Lav+R>J_&K^i*WUjuv0!V0+;O&Z!tJ3R0xAQMav&PE3UqlYBmPzI2qp9HlfQk(y)G3ycJL5c^b(46AlgvX6-xD_JG(qcPd%do_gfoL1tdj6_)&>Vxj7ex)3y_C=Tnv-Kl+J3>h^kOxz(;4%(&Q9N*Y!lZsXAP@Oz^Nu3%gC8^eyh|Mv#|{d82YFjB-RSH4^F1V%2hqx&q~F6aVVBl@FApey4YR@W2!q~Y@C<_SBQf~f!^5dNm(D|0lMkt_4CgOLUSBF$^NRWNpuG+H13Nc0?{L-0ePW06usw=1Yd5c}4ug2PJS4Bnnh*OyH}lO16|mYZ@R^k#2lPwTQSP7%b6Z@sZc8~U9OUArDZvgt+K!$b^jFZ`%inSStNi<Ku-}1m5PJNT9&3vJ@ynxwrtM2w?Nny<yW6t=vI=CB)tpf7!q9@$H%7YC0i9X(?0eo%4)Vhk<hkVNjNjdUsajyn^CPQ-O7W$u7n2PpL{bq1Lf=B^Nn{+MYo_DCYlAu1;%#2HN8Ct;;s1lQ!<B_6-=@%0U>yyuqtRXZFKGulcY%Xk^6i2(hcP`%x}F+dlS|&Y8CH5CtZhmRmQs{-DHL3?W92fi3Gh7Onv{#-e_z^;6(5o^>EGfi>SnZiqqLF=VU>HL?0AC7xc3^RBrt-mtIva^H1&9BaGDv7KLdrYCZ*p*-e5~$a!OelXq>oZoxfa~Pu-=I?hQ&;=K!ZK^HW$Q(9u0|Mzs6GNQq#O)bKa#0eX$QdM{Ei1GoBWb#D$D(3>bDtmMn!ls#yw84VIQBY1${0+jo)x<C%S^)#lQr?Xn&GnK6B`}S-5?6w&Vwz;L%E8}%_7C|7x<VdYjyhkOwg>eb5_X9Pk<Op=aSX-Bj^r8@lZ!Ch|@AorFtJN|DZkFPfkt7gdB#1-!5v3xS>{3Ivfkj5ULAItGn3P0sH@msn>~yw9s$*f>He2XJsbLSE{5OWfGypXA69?^M!Ga%bly9CW2Ta18NQy)dFG{if#0W8+KZpaX_YYBXR8S<qIZD<v^h6^P=e~tc#nc$34UGt`V(v;X1$jREVL<570e|r!Rf&*@I!{GH3H2c^h(91H+U0>nhpSFw2*d(agU5^iU9eOb?I<8qc{x|D415sVo;?utHZ1sN7zl)Xq~*ZiEnAOzBsEY?QC2q}NP*fECcV)BXEv?!FT+;-`~4XVB@y0?P)FZ8S4PsJ=AiLQ(@>t{mM&>K`8{!Cj8FESZZti?iAIGYEHCl7c@9${s`&NIK?$tcm~NFQQU!JlcIj>R=^7p-BOXme{w#t>HP>w>;>998i6ieSR#@P5Mwh=$w5wlPd%@+WEQ-^H;_ex+$L~!?+Q{5QrhF?12a)v-T2hf4i!^HHo&&L_XG*Z})4hXs02HxIp8dpzqd_0uZsTPf7>>uPmUhAn;9_sKZTJDsB6n#v$LkJ+^DG>GV~SN_YE!qYV|67&2cl%Jvc$n{Lm>g-Fi-=xUsj-Q8Il8&Lj!-JSm6&XvNVn0myE_in5}Z$7dJ}I{?0)WYzlUQ;lRe#;ed;-Pr@hWa0coEGZeSTlLa>abYI-iq%H3bq_pFBqYS;zvK}859^wj@A1!O$4({wr0cAAa@5{LtCrXq(6pXi>o1a)o^w3zaZpizVg@dOUn_)_7)B&T#$7YFeEpM={oebl8!7&78tpwlPkV1BWKw5p}bxHsH2qTaGQYZ>8JTM$bix?~NR2$E$`dKhx7G4&VvlXK~;DyHiIZnskr<wkWIm1wvmf)?Fz#zZSUKBIhdf9GnD#21u&66Zy7yg(f34aK|7ei0tUfSmbEyx?{>$jS}$l}9!c*<~>pY)OK_`9qNB+auhFY;Ws?J(~~7!Q^z5Z*tXb2TlS*TLV-v}gHOdEDG<=GUZbD@_EatZFXZ#N~u;Q1In19}@j*QII7=LB?r&DYY${e;CHLZNZ4(I0(jANXpEaet+9wdGskXPLJ%~(fiKshVLY|*;yum-{Q)q2`$o?*g{U%0U7N;k27eewFummdJLj9eD3GhELlz8wq`-sr73Gn+=9{azM97Omu1RUfC9noi9)54XIZqzpKzKpx#l!aMP8)EQd`p2dgJfUmI?&Z_s%V%kY_vEG5WCV?2Sp1He-t8Ae*#W40mni!d2pnVh2L85U(;c`K!oa|M~3tG7~ja@+V}fNH>zH`!ZUXxV{1V0{E!p&IvNcSeX1U5WJ;NT*NeAcMnNCDse_jTN6-DOx4I;&ENqg5;MY@7f6u(+I=(-V?jH|A)fZld3(VqPHH#<y?nr+u*(r{2e*mRmA-AS#^`Q^tk|8Ii(iAdyEB5d+w`PhFFMP?n5ECFq2L;jMmKOhz2^BgFTU#b6V-;_&$V}#=c_lIdnLHCdL~EFYCu6U3Ni*kCXiZ1N|4d!vq-Yws;F~tP^gqxR*Do1LS$W$D+>(oP$}qqor)TlPQ8GIS4(4)hkm157lkUzEGgcS&Q-<Ou<8~>+?}E=o0YalD`a^gfgH92X-W9r%C3nC;=y|74--F6?ar>c714LXhgHj!DX6IwjV;;kg47Q?i*bpjcOmsXspM@uf9f;dBQ8tIKb(0AyajJK(n&X34hH2^Z^`%C)%VS5OxleI5>BCBXNsMVI^BA?sxQ`AwDbkctk2xKmH)YK95=U)ao>k7nt9Ab$F-E&vQOm6@Y6IWYra00cqHEXuLL5qxHo&d-hI7YGwr&O)UWqK?4CEj;7Z*#y*Ank=kXX0@z5y0+m2Hx*=MhO*N@m146LK!^p(*!iz_{mJjYpl1DE{!#bY*!N?Zx=u6l_;mPkvhJeIGoSK2}v7L$D*WAbAf0(M>7IXVS~S$Ru?9$w<*3IE}Gm(Y)s`4ieWpzslJ7dVn~Y1q4H3sWM``pcOThS9U;`1?eDupmxfyp3tn9bR_fh}p8~#ps?VBJn`v4{swwM<~@!wzZUy>LU@xl>`q+9lcPCb^p(3+b>opX;`<|ZeXD~zt(vf?p`!^=ItHav0N>+YhgEO!TveQw-G<NNzgwes|QO9AI1k3i?1O@^;r;V62{^~g6Wfiar+n)$C2f;wRzt7T5t50rj_<LcufSN6SW`iTtpC?jhiy?7D5e%53#I#1i@|JG2i4AGsY{UDfZC9O8>B!h=)Z#5HE{DZ5!LU+QXpH>|U(bUh_1HtGc2Sd-ptbSiVkKJpS5GTX`~20MS2k&HZ$tCsE~E@&t94+46=#qv>s6jAQlKEre4!V}$5W!I^okT72VDa|Wa(vVxV_sigVA5NYZ3>)2%Wh|TO`XIG!Cd9whnHN3MV?Tc?fb~9+3)gzNyRgSfGi7g9o)+SJ&5Zcu>lnd7MeHLFJlPf51AsqlfrvS(G@K7xNUW+z=>`!lV@U+s+=n20vk^Wh}P1M^tF1g6(=1OMT{<$>-@!P}y0gVv(2L"
+    )
+).decode("utf-8")
 
 
 def _offline_example_inputs():
