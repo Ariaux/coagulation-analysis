@@ -6,9 +6,7 @@ from __future__ import annotations
 import csv
 import json
 import os
-import shutil
 import tempfile
-import time
 import zipfile
 
 import cv2
@@ -21,9 +19,6 @@ from grid_detector import DetectionError, GridDetection, detect_inner_squares
 TABLE_HEADERS = [
     "Cell", "Row", "Col", "Mean", "Median", "Std", "Min", "Max",
     "IntDen", "Area(px)", "Confidence", "Recovered",
-    "BBox X1", "BBox Y1", "BBox X2", "BBox Y2",
-    "Quad 1 X", "Quad 1 Y", "Quad 2 X", "Quad 2 Y",
-    "Quad 3 X", "Quad 3 Y", "Quad 4 X", "Quad 4 Y",
 ]
 
 CSV_HEADERS = [
@@ -139,72 +134,42 @@ def _build_bundle(
     results: list[dict],
     filename: str,
 ) -> str:
-    _cleanup_stale_bundles()
     output_dir = tempfile.mkdtemp(prefix="coagulation_web_")
+    for index, crop in enumerate(crops, start=1):
+        _write_png(os.path.join(output_dir, f"cell_{index:02d}.png"), crop)
+    _write_png(os.path.join(output_dir, "grid_overlay.png"), overlay)
+    _write_png(os.path.join(output_dir, "heatmap.png"), heatmap)
+
+    with open(
+        os.path.join(output_dir, "results.csv"), "w", newline="", encoding="utf-8"
+    ) as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(CSV_HEADERS)
+        writer.writerows(_csv_row(result) for result in results)
+
+    with open(
+        os.path.join(output_dir, "results.json"), "w", encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            {
+                "image": os.path.basename(filename),
+                "grid": "3x3",
+                "detection_confidence": round(float(detection.confidence), 3),
+                "cells": results,
+            },
+            json_file,
+            indent=2,
+        )
+
     artifact_names = [
         *(f"cell_{index:02d}.png" for index in range(1, 10)),
         "grid_overlay.png", "heatmap.png", "results.csv", "results.json",
     ]
     bundle_path = os.path.join(output_dir, "coagulation_results.zip")
-    try:
-        for index, crop in enumerate(crops, start=1):
-            _write_png(os.path.join(output_dir, f"cell_{index:02d}.png"), crop)
-        _write_png(os.path.join(output_dir, "grid_overlay.png"), overlay)
-        _write_png(os.path.join(output_dir, "heatmap.png"), heatmap)
-
-        with open(
-            os.path.join(output_dir, "results.csv"),
-            "w",
-            newline="",
-            encoding="utf-8",
-        ) as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow(CSV_HEADERS)
-            writer.writerows(_csv_row(result) for result in results)
-
-        with open(
-            os.path.join(output_dir, "results.json"), "w", encoding="utf-8"
-        ) as json_file:
-            json.dump(
-                {
-                    "image": os.path.basename(filename),
-                    "grid": "3x3",
-                    "detection_confidence": round(float(detection.confidence), 3),
-                    "cells": results,
-                },
-                json_file,
-                indent=2,
-            )
-
-        with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for artifact_name in artifact_names:
-                archive.write(
-                    os.path.join(output_dir, artifact_name), arcname=artifact_name
-                )
+    with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for artifact_name in artifact_names:
-            os.remove(os.path.join(output_dir, artifact_name))
-        return bundle_path
-    except Exception:
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise
-
-
-def _cleanup_stale_bundles(max_age_seconds: int = 24 * 60 * 60) -> None:
-    """Remove web result directories older than the download grace period."""
-    cutoff = time.time() - max_age_seconds
-    try:
-        entries = os.scandir(tempfile.gettempdir())
-    except OSError:
-        return
-    with entries:
-        for entry in entries:
-            if not entry.name.startswith("coagulation_web_"):
-                continue
-            try:
-                if entry.is_dir(follow_symlinks=False) and entry.stat().st_mtime < cutoff:
-                    shutil.rmtree(entry.path, ignore_errors=True)
-            except OSError:
-                continue
+            archive.write(os.path.join(output_dir, artifact_name), arcname=artifact_name)
+    return bundle_path
 
 
 def _empty_result(message: str) -> tuple:
@@ -254,7 +219,7 @@ def process_pipeline(
         bundle_path = _build_bundle(
             detection, crops, overlay_bgr, heatmap_bgr, results, filename
         )
-    except (DetectionError, OSError, ValueError, cv2.error) as exception:
+    except (DetectionError, OSError, ValueError) as exception:
         return _empty_result(str(exception))
 
     table = [
@@ -262,12 +227,7 @@ def process_pipeline(
             result["idx"], result["row"], result["col"], result["mean"],
             result["median"], result["std"], result["min"], result["max"],
             result["int_den"], result["area_px"], result["confidence"],
-            result["recovered"], *result["source_bbox"],
-            *[
-                coordinate
-                for point in result["source_quad"]
-                for coordinate in point
-            ],
+            result["recovered"],
         ]
         for result in results
     ]
