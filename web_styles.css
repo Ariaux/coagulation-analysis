@@ -575,3 +575,11 @@ body .gradio-container .status-field.block {
     transition-duration: 0.01ms !important;
   }
 }
+
+.upload-field button[aria-label="Click to upload or drop files"] .wrap {
+  font-size: 0 !important;
+}
+
+.upload-field .or {
+  display: none !important;
+}

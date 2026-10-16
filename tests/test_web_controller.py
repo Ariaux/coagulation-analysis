@@ -504,6 +504,14 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIn(".gradio-container .main", mobile)
         self.assertIn("padding: 0 !important", mobile)
 
+    def test_upload_dropzone_hides_redundant_instruction_text(self):
+        css = web_app._load_local_styles()
+
+        self.assertIn('.upload-field button[aria-label="Click to upload or drop files"] .wrap', css)
+        self.assertIn("font-size: 0 !important", css)
+        self.assertIn(".upload-field .or", css)
+        self.assertIn("display: none !important", css)
+
     def test_single_analysis_has_stable_api_name(self):
         config = self.make_config()
         api_names = {

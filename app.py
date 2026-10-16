@@ -282,7 +282,16 @@ _EMBEDDED_CSS = zlib.decompress(
 ).replace(
     "padding: 22px 28px 64px !important;",
     "padding: 22px clamp(12px, 2vw, 28px) 64px !important;",
-)
+) + """\
+
+.upload-field button[aria-label="Click to upload or drop files"] .wrap {
+  font-size: 0 !important;
+}
+
+.upload-field .or {
+  display: none !important;
+}
+"""
 
 
 def _offline_example_inputs():
