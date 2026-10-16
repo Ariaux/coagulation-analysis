@@ -73,7 +73,67 @@ pip install opencv-python numpy gradio
 pip install -r requirements_dl.txt
 ```
 
-### 2. Classical CV Pipeline (no GPU needed)
+## Windows Offline App — Fixed 3x3 Fixture
+
+Download the Windows release ZIP and unzip the whole `CoagulationAnalysis`
+folder. Keep the executable and all files in that folder together. Photograph
+the complete fixed 3×3 fixture straight on, with all four outer edges visible.
+Both image dimensions must be at least 600 pixels (for example, 600×800 is
+valid).
+
+Drag the photo onto `CoagulationAnalysis.exe`. The app always detects a fixed
+3×3 fixture; there is no row or column setting. It numbers positions 1–9 in
+row-major order (left to right, then top to bottom), retains empty positions,
+and crops only the innermost square inside each cell's dark frame.
+
+The output is created beside the input photo. Its readable folder name includes
+the input stem and extension plus a short stable filename hash, so distinct
+original filenames cannot overwrite one another. Reprocessing the same exact
+filename deterministically replaces only that input's own artifacts.
+Each output folder contains:
+
+- `cell_01.png` through `cell_09.png`, including empty positions;
+- `*_grid_overlay.png`, showing detected inner-square coordinates and numbers;
+- `*_heatmap.png`, showing the 3×3 measurement heatmap;
+- `*_results.csv`, with measurements, confidence, recovery status, a half-open
+  source bounding box, and eight scalar source-quadrilateral coordinates;
+- `*_results.json`, with the same measurements and geometry.
+
+Recovery is deliberately narrow: the detector may reconstruct one globally
+unique weak inner edge from the matching boundaries in the other two row or
+column cells. Structural-divider failures, multiple weak edges, incomplete
+fixtures, and unreliable geometry stop with an actionable error before any
+final output folder or partial result set is created.
+
+The packaged app runs entirely offline and does not require Python or an
+internet connection.
+
+### Troubleshooting
+
+- **Image is rejected as too small:** both width and height must be at least
+  600 pixels.
+- **Fixture cannot be detected:** retake the photo with the complete fixture
+  and all outer edges in frame; do not crop the fixture.
+- **Strong side angle:** photograph the fixture more directly from above. The
+  detector handles small rotations, not strong perspective distortion.
+- **Reflections or blur:** reduce glare and refocus so the dark frame edges are
+  clear.
+- **App no longer starts after moving files:** restore the complete unzipped
+  folder. Do not move only `CoagulationAnalysis.exe` or delete its companion
+  files.
+- **Chinese paths:** Chinese and other Unicode file/folder names are supported.
+- **Similar filenames:** outputs are isolated by a stable hash of the exact
+  original filename, including its extension.
+- **Audit log:** `coagulation_log.txt` on the Windows Desktop records overall
+  detection confidence, outer-fixture coordinates, each cell's confidence,
+  recovery status and source bounding box, plus actionable detection failures.
+  If the Desktop log cannot be written, the console shows a `Log file
+  unavailable` warning.
+
+## Classical CV Pipeline (Variable-Grid CLI, no GPU needed)
+
+`full_workflow.py` is the separate, developer-oriented variable-grid workflow.
+Unlike the fixed desktop app above, it accepts `--rows` and `--cols`.
 
 ```bash
 # Interactive desktop GUI — drag a rectangle, auto grid analysis
@@ -86,7 +146,7 @@ python3 analyze.py folder/ --batch
 python3 analyze.py folder/ --watch
 ```
 
-### 3. Deep Learning Training (GPU recommended)
+## Deep Learning Training (GPU recommended)
 
 ```bash
 # Basic training — needs cell_*.png images from the classical pipeline
@@ -106,7 +166,7 @@ python3 train_dl.py \
 
 Models are saved to `dl/checkpoints/best_model.pt`. TensorBoard logs in `dl/logs/`.
 
-### 4. Deep Learning Inference
+## Deep Learning Inference
 
 ```python
 from dl.inference import CoagInference
@@ -236,9 +296,11 @@ Identical to ImageJ (Fiji). Values are directly comparable to manual operation.
 
 ## Output
 
-### Classical CV
+### Variable-Grid Classical CV CLI
 
-Results are saved to `<image>_analysis/`:
+The `full_workflow.py` and `analyze.py` CLI tools save results to
+`<image>_analysis/`. These outputs are separate from the fixed desktop app
+described above.
 
 | File | Content |
 |------|---------|
@@ -281,14 +343,26 @@ Computed on the **inverted** image (255 − grayscale). Higher values = greater 
 coagulation-analysis/
 ├── README.md                  # This document
 ├── requirements.txt           # Classical CV dependencies (lightweight)
+├── requirements_research.txt  # Reproducible cropping evaluation dependencies
 ├── requirements_dl.txt        # Full dependencies (including deep learning)
 ├── run_app.sh                 # Gradio web app launcher
 │
 ├── full_workflow.py           # Classical CV: interactive GUI + analysis + heatmap
 ├── analyze.py                 # Classical CV: CLI batch processing
 ├── app.py                     # Gradio web interface (Hugging Face Space)
-├── app_standalone.py          # Standalone desktop app (PyInstaller)
+├── app_standalone.py          # Fixed 3x3 offline desktop app (PyInstaller)
+├── grid_detector.py           # Fixed-fixture and inner-square detector
 ├── imagej_workflow.ijm        # ImageJ/Fiji macro
+│
+├── research/                  # Cropping evaluation and annotation tools
+│   ├── EXPERIMENTS.md         # Protocol, commands, metrics, and artifact map
+│   ├── annotate_inner_squares.py
+│   └── evaluate_cropping.py
+│
+├── tests/                     # Production and research unit tests
+│   ├── test_grid_detector.py
+│   ├── test_standalone_pipeline.py
+│   └── test_research_evaluation.py
 │
 ├── dl/                        # Deep learning module
 │   ├── config.py              #   Centralized config (data/model/loss/training)
@@ -306,12 +380,61 @@ coagulation-analysis/
 │
 └── input/                     # Example data
     └── *_analysis/            #   Analysis output + cell images
-│
-├── train_dl.py                # DL training entry point
-│
-└── input/                     # Example data
-    └── *_analysis/            #   Analysis output + cell images
 ```
+
+---
+
+## Research Evaluation
+
+The reproducible fixed-fixture cropping study is documented in
+[`research/EXPERIMENTS.md`](research/EXPERIMENTS.md). Install its dependencies
+separately:
+
+```bash
+pip install -r requirements_research.txt
+```
+
+Run the synthetic comparison into a new or empty output directory:
+
+```bash
+python -m research.evaluate_cropping --synthetic \
+  --output research/results/primary-new
+```
+
+Run the synthetic ablation study into another new or empty directory:
+
+```bash
+python -m research.evaluate_cropping --synthetic \
+  --output research/results/ablations-new --ablations
+```
+
+Create independent manual annotations for a real image with:
+
+```bash
+python -m research.annotate_inner_squares path/to/image.png \
+  --output path/to/image.annotations.json
+```
+
+Create a UTF-8 manifest with the exact columns
+`case,image,annotations,condition,level`. Image and annotation paths are
+relative to the manifest:
+
+```csv
+case,image,annotations,condition,level
+photo-001,images/photo-001.png,labels/photo-001.json,lighting,normal
+```
+
+Then run the labeled evaluation:
+
+```bash
+python -m research.evaluate_cropping \
+  --manifest path/to/manifest.csv \
+  --output research/results/manual-new
+```
+
+Real-image results must come from reviewed manual annotations. The repository
+does not provide or fabricate real-data measurements; synthetic runs verify
+software behavior and reproducibility only.
 
 ---
 
