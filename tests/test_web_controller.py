@@ -599,14 +599,10 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIsNotNone(main)
         application = mock.Mock()
         working_directory = Path("/tmp/coagulation-website")
-        with mock.patch.object(
-            web_app.Path,
-            "cwd",
-            return_value=working_directory,
+        with mock.patch.dict(web_app.os.environ, {}, clear=True), mock.patch.object(
+            web_app.Path, "cwd", return_value=working_directory
         ), mock.patch.object(
-            web_app,
-            "create_app",
-            return_value=application,
+            web_app, "create_app", return_value=application
         ) as create:
             main()
 
@@ -615,6 +611,30 @@ class WebApplicationTests(unittest.TestCase):
             server_name="127.0.0.1",
             share=False,
             inbrowser=True,
+            footer_links=[],
+        )
+
+    def test_main_launches_hugging_face_site_on_public_interface(self):
+        main = getattr(web_app, "main", None)
+        self.assertIsNotNone(main)
+        application = mock.Mock()
+        hosted_root = Path(tempfile.gettempdir()) / "coagulation-hugging-face-results"
+        with mock.patch.dict(
+            web_app.os.environ,
+            {"SPACE_ID": "Yilunaria/coagulation-quantification", "PORT": "7860"},
+            clear=True,
+        ), mock.patch.object(
+            web_app, "create_app", return_value=application
+        ) as create:
+            main()
+
+        create.assert_called_once_with(hosted_root, hosted=True)
+        application.launch.assert_called_once_with(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            inbrowser=False,
+            allowed_paths=[str(hosted_root)],
             footer_links=[],
         )
 

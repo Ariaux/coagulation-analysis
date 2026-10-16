@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import threading
 
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
@@ -583,8 +584,9 @@ def _connection_panel(access: LanAccessInfo) -> str:
 def create_app(
     results_root: str | Path,
     lan_access: LanAccessInfo | None = None,
+    hosted: bool = False,
 ) -> gr.Blocks:
-    """Build the offline analysis application without starting its server."""
+    """Build the analysis application without starting its server."""
     _install_offline_templates()
     root = Path(results_root)
     css = _load_local_styles()
@@ -593,7 +595,11 @@ def create_app(
         analytics_enabled=False,
     ) as application:
         gr.Markdown(
-            "# Coagulation Analysis\nLocal and offline",
+            (
+                "# Coagulation Analysis\nHosted web app"
+                if hosted
+                else "# Coagulation Analysis\nLocal and offline"
+            ),
             elem_id="application-title",
         )
         if lan_access is not None:
@@ -623,7 +629,19 @@ def create_app(
 
 
 def main() -> None:
-    """Launch the local application when this module is run as a script."""
+    """Launch locally or with Hugging Face Space network settings."""
+    if os.environ.get("SPACE_ID"):
+        results_root = Path(tempfile.gettempdir()) / "coagulation-hugging-face-results"
+        create_app(results_root, hosted=True).launch(
+            server_name="0.0.0.0",
+            server_port=int(os.environ.get("PORT", "7860")),
+            share=False,
+            inbrowser=False,
+            allowed_paths=[str(results_root)],
+            footer_links=[],
+        )
+        return
+
     create_app(Path.cwd() / "results").launch(
         server_name="127.0.0.1",
         share=False,
