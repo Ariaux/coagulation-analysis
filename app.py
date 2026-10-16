@@ -458,45 +458,77 @@ def _single_source(gallery_path, camera_path):
 
 
 def _build_single_tab(root: Path, hosted: bool = False) -> None:
-    with gr.Row():
-        with gr.Column(scale=2):
+    with gr.Row(elem_id="single-workspace", elem_classes="workspace-grid"):
+        with gr.Column(
+            scale=2,
+            elem_id="single-input-card",
+            elem_classes=["workspace-card", "input-card"],
+        ):
+            gr.Markdown(
+                "### Upload sample\nChoose one image from your device or take a photo.",
+                elem_classes="section-heading",
+            )
             gallery_source = gr.File(
                 label="Choose from gallery or files",
                 file_count="single",
                 type="filepath",
                 elem_id="gallery-source",
+                elem_classes="upload-field",
             )
             camera_source = gr.File(
                 label="Take photo",
                 file_count="single",
                 type="filepath",
                 elem_id="camera-source",
+                elem_classes="upload-field",
             )
-            inset = gr.Slider(
-                0,
-                15,
-                value=5,
-                step=0.5,
-                label="Inner crop inset",
+            gr.Markdown(
+                "### Analysis settings\nFine-tune only when your workflow needs it.",
+                elem_classes="section-heading settings-heading",
             )
-            threshold = gr.Slider(
-                0,
-                255,
-                value=60,
-                step=1,
-                label="No-clot threshold",
+            with gr.Group(elem_classes="settings-group"):
+                inset = gr.Slider(
+                    0,
+                    15,
+                    value=5,
+                    step=0.5,
+                    label="Inner crop inset",
+                )
+                threshold = gr.Slider(
+                    0,
+                    255,
+                    value=60,
+                    step=1,
+                    label="No-clot threshold",
+                )
+            analyze = gr.Button(
+                "Analyze Image",
+                variant="primary",
+                elem_classes="primary-action",
             )
-            analyze = gr.Button("Analyze Image", variant="primary")
             status = gr.Textbox(
                 label="Status",
                 interactive=False,
                 elem_classes="status-field",
             )
-        with gr.Column(scale=3):
+        with gr.Column(
+            scale=3,
+            elem_id="single-results-card",
+            elem_classes=["workspace-card", "result-card"],
+        ):
+            gr.Markdown(
+                "### Detected cells\nThe final 3×3 inner crops appear here.",
+                elem_classes="section-heading",
+            )
             crops = gr.Gallery(
                 label="Final inner crops",
                 columns=3,
                 rows=3,
+                elem_id="result-gallery",
+            )
+            gr.Markdown(
+                "### Visual results\nReview the detected boundaries and heatmap.",
+                elem_classes="section-heading results-heading",
             )
             with gr.Row():
                 overlay = gr.Image(
@@ -507,19 +539,45 @@ def _build_single_tab(root: Path, hosted: bool = False) -> None:
                     label="Publication heatmap",
                     type="filepath",
                 )
-    table = gr.Dataframe(
-        headers=["Cell", "Row", "Column", "Mean", "Confidence", "Recovered"],
-        interactive=False,
-        label="Per-cell results",
-    )
-    with gr.Row():
-        csv_file = gr.File(label="Download CSV", interactive=False)
-        zip_file = gr.File(label="Download result ZIP", interactive=False)
-    result_dir = (
-        gr.State()
-        if hosted
-        else gr.Textbox(label="Saved result folder", interactive=False)
-    )
+            gr.Markdown(
+                "### Measurements\nCell-level values and confidence scores.",
+                elem_classes="section-heading results-heading",
+            )
+            table = gr.Dataframe(
+                headers=[
+                    "Cell",
+                    "Row",
+                    "Column",
+                    "Mean",
+                    "Confidence",
+                    "Recovered",
+                ],
+                interactive=False,
+                label="Per-cell results",
+                elem_classes="results-table",
+            )
+            with gr.Group(elem_classes="download-card"):
+                gr.Markdown(
+                    "### Download results\nKeep the measurements or the complete result bundle.",
+                    elem_classes="section-heading",
+                )
+                with gr.Row(elem_classes="download-row"):
+                    csv_file = gr.File(label="Download CSV", interactive=False)
+                    zip_file = gr.File(
+                        label="Download result ZIP", interactive=False
+                    )
+                result_dir = (
+                    gr.State()
+                    if hosted
+                    else gr.Textbox(
+                        label="Saved result folder", interactive=False
+                    )
+                )
+                if not hosted:
+                    open_folder = gr.Button(
+                        "Open folder on Windows PC",
+                        elem_classes="secondary-action",
+                    )
 
     gallery_source.change(lambda: None, outputs=camera_source)
     camera_source.change(lambda: None, outputs=gallery_source)
@@ -533,7 +591,6 @@ def _build_single_tab(root: Path, hosted: bool = False) -> None:
         api_name="analyze_single",
     )
     if not hosted:
-        open_folder = gr.Button("Open folder on Windows PC")
         open_folder.click(
             lambda path: open_result_folder(path, root),
             result_dir,
@@ -543,46 +600,93 @@ def _build_single_tab(root: Path, hosted: bool = False) -> None:
 
 
 def _build_batch_tab(root: Path, hosted: bool = False) -> None:
-    sources = gr.File(
-        label="Complete 3×3 fixture images",
-        file_count="multiple",
-        type="filepath",
-    )
-    with gr.Row():
-        inset = gr.Slider(
-            0,
-            15,
-            value=5,
-            step=0.5,
-            label="Inner crop inset",
-        )
-        threshold = gr.Slider(
-            0,
-            255,
-            value=60,
-            step=1,
-            label="No-clot threshold",
-        )
-    analyze = gr.Button("Analyze Batch", variant="primary")
-    status = gr.Textbox(
-        label="Batch status",
-        interactive=False,
-        elem_classes="status-field",
-    )
-    table = gr.Dataframe(
-        headers=["Image", "Cells", "Status", "Reason", "Result"],
-        interactive=False,
-        label="Batch results",
-    )
-    with gr.Row():
-        summary = gr.File(label="Batch summary CSV", interactive=False)
-        failures = gr.File(label="Failure report CSV", interactive=False)
-        archive = gr.File(label="Download batch ZIP", interactive=False)
-    batch_dir = (
-        gr.State()
-        if hosted
-        else gr.Textbox(label="Saved batch folder", interactive=False)
-    )
+    with gr.Row(elem_id="batch-workspace", elem_classes="workspace-grid"):
+        with gr.Column(
+            scale=2,
+            elem_id="batch-input-card",
+            elem_classes=["workspace-card", "input-card"],
+        ):
+            gr.Markdown(
+                "### Upload samples\nChoose multiple complete 3×3 fixture images.",
+                elem_classes="section-heading",
+            )
+            sources = gr.File(
+                label="Complete 3×3 fixture images",
+                file_count="multiple",
+                type="filepath",
+                elem_classes="upload-field",
+            )
+            gr.Markdown(
+                "### Analysis settings\nThe same settings apply to every image.",
+                elem_classes="section-heading settings-heading",
+            )
+            with gr.Group(elem_classes="settings-group"):
+                inset = gr.Slider(
+                    0,
+                    15,
+                    value=5,
+                    step=0.5,
+                    label="Inner crop inset",
+                )
+                threshold = gr.Slider(
+                    0,
+                    255,
+                    value=60,
+                    step=1,
+                    label="No-clot threshold",
+                )
+            analyze = gr.Button(
+                "Analyze Batch",
+                variant="primary",
+                elem_classes="primary-action",
+            )
+            status = gr.Textbox(
+                label="Batch status",
+                interactive=False,
+                elem_classes="status-field",
+            )
+        with gr.Column(
+            scale=3,
+            elem_id="batch-results-card",
+            elem_classes=["workspace-card", "result-card"],
+        ):
+            gr.Markdown(
+                "### Measurements\nProgress and results for every uploaded image.",
+                elem_classes="section-heading",
+            )
+            table = gr.Dataframe(
+                headers=["Image", "Cells", "Status", "Reason", "Result"],
+                interactive=False,
+                label="Batch results",
+                elem_classes="results-table",
+            )
+            with gr.Group(elem_classes="download-card"):
+                gr.Markdown(
+                    "### Download results\nExport summaries, failures, or the full batch.",
+                    elem_classes="section-heading",
+                )
+                with gr.Row(elem_classes="download-row"):
+                    summary = gr.File(
+                        label="Batch summary CSV", interactive=False
+                    )
+                    failures = gr.File(
+                        label="Failure report CSV", interactive=False
+                    )
+                    archive = gr.File(
+                        label="Download batch ZIP", interactive=False
+                    )
+                batch_dir = (
+                    gr.State()
+                    if hosted
+                    else gr.Textbox(
+                        label="Saved batch folder", interactive=False
+                    )
+                )
+                if not hosted:
+                    open_folder = gr.Button(
+                        "Open batch folder on Windows PC",
+                        elem_classes="secondary-action",
+                    )
 
     analyze.click(
         lambda paths, value, cutoff: _batch_values(
@@ -592,7 +696,6 @@ def _build_batch_tab(root: Path, hosted: bool = False) -> None:
         [table, summary, failures, archive, batch_dir, status],
     )
     if not hosted:
-        open_folder = gr.Button("Open batch folder on Windows PC")
         open_folder.click(
             lambda path: open_result_folder(path, root),
             batch_dir,
@@ -641,20 +744,29 @@ def create_app(
         analytics_enabled=False,
         delete_cache=(3600, 86400) if hosted else None,
     ) as application:
-        gr.Markdown(
-            (
-                "# Coagulation Analysis\nHosted web app"
-                if hosted
-                else "# Coagulation Analysis\nLocal and offline"
-            ),
-            elem_id="application-title",
+        workspace_label = "Online workspace" if hosted else "Local workspace"
+        gr.HTML(
+            "<div class='brand-lockup'><span class='brand-mark'>C</span>"
+            "<span class='brand-name'>Coagula</span></div>"
+            f"<span class='environment-badge'><i></i>{workspace_label}</span>",
+            elem_id="product-bar",
+        )
+        gr.HTML(
+            "<div class='hero-copy'><p>Image analysis</p>"
+            "<h1>Clear results. Confident decisions.</h1>"
+            "<span>Upload a 3×3 sample image and get precise, "
+            "cell-level measurements in seconds.</span></div>"
+            "<div class='hero-visual' aria-hidden='true'>"
+            "<i></i><i></i><i></i><i></i><i></i><i></i>"
+            "<i></i><i></i><i></i></div>",
+            elem_id="hero-card",
         )
         if lan_access is not None:
             gr.HTML(_connection_panel(lan_access), elem_id="lan-connection-panel")
-        with gr.Tabs():
-            with gr.Tab("Single Image"):
+        with gr.Tabs(elem_id="analysis-tabs"):
+            with gr.Tab("Single image"):
                 _build_single_tab(root, hosted=hosted)
-            with gr.Tab("Batch Processing"):
+            with gr.Tab("Batch processing"):
                 _build_batch_tab(root, hosted=hosted)
     # Gradio 6 applies CSS at launch. Retaining it on both attributes keeps the
     # factory inspectable and lets any caller launch the returned Blocks object

@@ -98,8 +98,8 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIsNotNone(app)
         serialized = str(app.get_config_file())
         for label in (
-            "Single Image",
-            "Batch Processing",
+            "Single image",
+            "Batch processing",
             "Inner crop inset",
             "No-clot threshold",
             "Analyze Image",
@@ -107,6 +107,52 @@ class WebApplicationTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 self.assertIn(label, serialized)
+
+    def test_warm_minimal_ui_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            application = create_app(Path(temp_dir) / "results", hosted=True)
+            serialized = str(application.get_config_file())
+
+        for text in (
+            "Coagula",
+            "Image analysis",
+            "Clear results. Confident decisions.",
+            "Single image",
+            "Batch processing",
+            "Upload sample",
+            "Analysis settings",
+            "Detected cells",
+            "Visual results",
+            "Measurements",
+            "Download results",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, serialized)
+        for element_id in (
+            "product-bar",
+            "hero-card",
+            "analysis-tabs",
+            "single-workspace",
+            "single-input-card",
+            "single-results-card",
+            "batch-workspace",
+            "batch-input-card",
+            "batch-results-card",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(element_id, serialized)
+
+    def test_environment_badge_matches_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hosted = str(
+                create_app(Path(temp_dir) / "hosted", hosted=True).get_config_file()
+            )
+            local = str(create_app(Path(temp_dir) / "local").get_config_file())
+
+        self.assertIn("Online workspace", hosted)
+        self.assertNotIn("Local workspace", hosted)
+        self.assertIn("Local workspace", local)
+        self.assertNotIn("Online workspace", local)
 
     def test_hosted_app_omits_server_side_folder_opening_controls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,7 +162,7 @@ class WebApplicationTests(unittest.TestCase):
             )
             serialized = str(application.get_config_file())
 
-        self.assertIn("Hosted web app", serialized)
+        self.assertIn("Online workspace", serialized)
         self.assertNotIn("Open folder on Windows PC", serialized)
         self.assertNotIn("Open batch folder on Windows PC", serialized)
         self.assertNotIn("Saved result folder", serialized)
