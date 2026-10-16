@@ -34,7 +34,7 @@ body,
   width: min(100%, 1380px) !important;
   max-width: 1380px !important;
   margin: 0 auto !important;
-  padding: 22px 28px 64px !important;
+  padding: 22px clamp(12px, 2vw, 28px) 64px !important;
   background: transparent !important;
 }
 
@@ -59,7 +59,7 @@ body,
   padding: 0 4px;
 }
 
-#product-bar > div {
+#product-bar .prose {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -123,7 +123,7 @@ body,
   box-shadow: var(--shadow);
 }
 
-#hero-card > div {
+#hero-card .prose {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(220px, 0.7fr);
   align-items: center;
@@ -439,7 +439,7 @@ body .gradio-container .status-field.block {
     padding: 34px;
   }
 
-  #hero-card > div {
+  #hero-card .prose {
     grid-template-columns: minmax(0, 1fr) 190px;
     gap: 28px;
   }
@@ -460,6 +460,14 @@ body .gradio-container .status-field.block {
 }
 
 @media (max-width: 760px) {
+  .gradio-container.gradio-container {
+    padding: 12px 12px 42px !important;
+  }
+
+  .gradio-container .main.main {
+    padding: 0 !important;
+  }
+
   .gradio-container {
     width: 100% !important;
     max-width: 100% !important;
@@ -492,7 +500,7 @@ body .gradio-container .status-field.block {
     border-radius: 22px;
   }
 
-  #hero-card > div {
+  #hero-card .prose {
     display: block;
   }
 

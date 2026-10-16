@@ -168,7 +168,9 @@ class WebApplicationTests(unittest.TestCase):
                 self.assertIn(token, stylesheet)
         for selector in (
             "#product-bar",
+            "#product-bar .prose",
             "#hero-card",
+            "#hero-card .prose",
             "#single-workspace",
             "#batch-workspace",
             ".workspace-card",
@@ -176,6 +178,7 @@ class WebApplicationTests(unittest.TestCase):
             ".download-card",
             ".primary-action",
             "@media (max-width: 760px)",
+            "clamp(12px, 2vw, 28px)",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, stylesheet)
@@ -494,6 +497,12 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIn("box-sizing: border-box !important", css)
         self.assertIn("min-width: 0 !important", mobile)
         self.assertIn("flex-direction: column", mobile)
+
+    def test_global_mobile_bootstrap_removes_gradio_shell_padding(self):
+        mobile = web_app._MOBILE_LAYOUT_STYLE
+
+        self.assertIn(".gradio-container .main", mobile)
+        self.assertIn("padding: 0 !important", mobile)
 
     def test_single_analysis_has_stable_api_name(self):
         config = self.make_config()
