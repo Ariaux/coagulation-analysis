@@ -1,0 +1,112 @@
+:root {
+  --navy: #182a45;
+  --blue: #3f78b5;
+  --red: #a42e3d;
+  --surface: #ffffff;
+  --background: #f5f7fa;
+}
+
+body {
+  background: var(--background);
+}
+
+.gradio-container {
+  max-width: 1440px !important;
+  margin: 0 auto;
+  padding: 24px !important;
+  color: var(--navy);
+  background: var(--background);
+}
+
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3 {
+  color: var(--navy);
+  letter-spacing: -0.015em;
+}
+
+#application-title h1 {
+  color: var(--navy) !important;
+}
+
+#lan-connection-panel {
+  border: 1px solid #b8c7d9;
+  border-radius: 12px;
+  background: #f6f9fc;
+  padding: 14px;
+}
+
+#lan-qr {
+  width: 168px;
+  height: 168px;
+  image-rendering: pixelated;
+}
+
+.gradio-container .block,
+.gradio-container .form {
+  border-color: rgba(24, 42, 69, 0.16);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.gradio-container .gap {
+  gap: 18px;
+}
+
+.gradio-container button.primary {
+  background: var(--red) !important;
+  border-color: var(--red) !important;
+  color: var(--surface) !important;
+  font-weight: 650;
+}
+
+.gradio-container button.primary:hover {
+  background: var(--navy) !important;
+  border-color: var(--navy) !important;
+}
+
+body .gradio-container div.status-field.block {
+  border-left: 4px solid var(--blue) !important;
+}
+
+.gradio-container .status-field textarea,
+.gradio-container .status-field input {
+  color: var(--navy);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .gradio-container {
+    box-sizing: border-box !important;
+    width: 100vw !important;
+    padding: 12px !important;
+  }
+
+  .gradio-container,
+  .gradio-container .main,
+  .gradio-container .wrap,
+  .gradio-container .contain,
+  .gradio-container .column,
+  .gradio-container .row,
+  .gradio-container .tabs,
+  .gradio-container .tabitem {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .gradio-container .row {
+    flex-direction: column;
+  }
+
+  #lan-connection-panel,
+  #lan-connection-panel section,
+  .gradio-container img {
+    max-width: 100%;
+  }
+
+  .gradio-container .table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
